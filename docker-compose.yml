@@ -1,0 +1,35 @@
+# Orchestration locale : un service pipeline (ingestion micro-batch) + le dashboard,
+# partageant un volume de données. Démontre la conteneurisation (BC2.5 C2).
+services:
+  pipeline:
+    build: .
+    image: ciel-tranquille:latest
+    env_file:
+      - .env
+    environment:
+      CT_INGEST_MODE: ${CT_INGEST_MODE:-replay}
+    volumes:
+      - ct-data:/app/data
+      - ct-models:/app/models
+    # Bootstrap (synth -> curated -> modèle) puis boucle de micro-batches.
+    command: >
+      bash -c "scripts/bootstrap_demo.sh &&
+               while true; do
+                 python -m ciel_tranquille.ingest.poller --batches 5 --no-sleep || true;
+                 sleep 300;
+               done"
+
+  dashboard:
+    build: .
+    image: ciel-tranquille:latest
+    depends_on:
+      - pipeline
+    ports:
+      - "8501:8501"
+    volumes:
+      - ct-data:/app/data
+      - ct-models:/app/models
+
+volumes:
+  ct-data:
+  ct-models:

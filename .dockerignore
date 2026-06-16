@@ -1,0 +1,14 @@
+.venv/
+**/.venv/
+legacy/
+notebooks/
+outputs/
+data/raw/
+data/curated/
+*.duckdb
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.pdf
