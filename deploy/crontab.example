@@ -1,0 +1,11 @@
+# Ordonnancement micro-batch de Ciel Tranquille via cron (déploiement VPS solo).
+# Un cycle (ingestion + reconstruction curated) toutes les 5 minutes.
+# Installer avec :  crontab deploy/crontab.example
+#
+# Remarque : OpenSky free limite à ~1 req / 10 s ; le cycle ci-dessous fait
+# 5 micro-batches espacés de CT_POLL_INTERVAL_S, puis reconstruit la couche
+# curated. Pour un vrai temps réel push (limite assumée), il faudrait un broker
+# (cf. veille-techno.md).
+
+CT_BATCHES=5
+*/5 * * * * /chemin/vers/ciel-tranquille/scripts/run_cycle.sh >> /var/log/ciel-tranquille.log 2>&1

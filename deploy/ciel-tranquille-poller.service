@@ -1,0 +1,14 @@
+# systemd service — un cycle de pipeline micro-batch Ciel Tranquille.
+# Déclenché par le timer associé (ciel-tranquille-poller.timer).
+# Copier dans /etc/systemd/system/ puis : systemctl enable --now ciel-tranquille-poller.timer
+[Unit]
+Description=Ciel Tranquille — cycle micro-batch (ingestion + curated)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ciel-tranquille
+EnvironmentFile=/opt/ciel-tranquille/.env
+ExecStart=/opt/ciel-tranquille/scripts/run_cycle.sh
+User=ciel

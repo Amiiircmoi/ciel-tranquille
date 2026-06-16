@@ -1,0 +1,12 @@
+# systemd timer — déclenche le cycle micro-batch toutes les 5 minutes.
+[Unit]
+Description=Timer Ciel Tranquille — cycle micro-batch toutes les 5 min
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
