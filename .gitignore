@@ -1,0 +1,53 @@
+# --- Secrets (NE JAMAIS committer) ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# --- Environnements Python ---
+.venv/
+venv/
+env/
+ENV/
+**/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# --- Données générées (landing / curated) — régénérables ---
+data/raw/
+data/curated/
+*.duckdb
+*.duckdb.wal
+
+# --- OS / IDE ---
+.DS_Store
+.idea/
+.vscode/
+
+# --- Hors périmètre du dépôt publié (gardés en local) ---
+# Fichiers locaux (non versionnés)
+legacy/
+# Local
+
+# Documents locaux
+*.pdf
+# Notes
+
+# Local
+
+
+# --- Artefacts régénérables (via make demo / make train) ---
+# généré par ct-synth (les CSV réels restent versionnés)
+data/samples/bruit_synth.csv
+# modèle entraîné + rapports (régénérables)
+models/*.joblib
+models/*.json
+
+# Notebooks
+notebooks/
