@@ -1,0 +1,13 @@
+# systemd service — collecte journalière des événements de survol Bruitparif.
+# Déclenché par ciel-tranquille-noise.timer. Recharge aussi la table DuckDB.
+[Unit]
+Description=Ciel Tranquille — collecte événements de survol Bruitparif (source bruit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ciel-tranquille
+EnvironmentFile=/opt/ciel-tranquille/.env
+ExecStart=/opt/ciel-tranquille/scripts/collect_noise.sh --days 2
+User=ciel

@@ -6,6 +6,7 @@ d'environnement (fichier `.env` gitignoré). Voir `.env.example`.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -14,6 +15,25 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Racine du dépôt (src/ciel_tranquille/config.py -> remonte de 3 niveaux)
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@dataclass(frozen=True)
+class Station:
+    """Station de mesure Bruitparif retenue (sous un couloir aérien clair)."""
+
+    measurement_id: str
+    latitude: float
+    longitude: float
+    airport: str  # couloir dominant (CDG / ORY)
+
+
+# Les 3 stations co-localisées retenues (sous un couloir d'approche clair).
+# Coordonnées confirmées en direct via /sites de l'API Bruitparif (2026-06-16).
+STATIONS: tuple[Station, ...] = (
+    Station("95500-GONESSE-MEDIATHEQUE-M", 48.985000, 2.447118, "CDG"),
+    Station("94290-VILLENEUVE-LE-ROI-NOBLECOURT", 48.730312, 2.427967, "ORY"),
+    Station("95390-ST-PRIX-MAIRIE-M", 49.006393, 2.263266, "CDG"),
+)
 
 
 class BoundingBox(BaseSettings):
@@ -49,14 +69,21 @@ class Settings(BaseSettings):
     opensky_client_id: str = Field(default="", alias="OPENSKY_CLIENT_ID")
     opensky_client_secret: str = Field(default="", alias="OPENSKY_CLIENT_SECRET")
 
-    # --- Bounding box (Île-de-France par défaut) ---
-    bbox_lat_min: float = Field(default=48.50, alias="CT_BBOX_LAT_MIN")
-    bbox_lon_min: float = Field(default=1.90, alias="CT_BBOX_LON_MIN")
-    bbox_lat_max: float = Field(default=49.10, alias="CT_BBOX_LAT_MAX")
-    bbox_lon_max: float = Field(default=2.80, alias="CT_BBOX_LON_MAX")
+    # --- Bounding box combinée (3 stations) — optimisée pour le coût crédits OpenSky ---
+    # ≈0,15 deg² → tranche OpenSky la moins chère (1 crédit/appel). Filtrage par
+    # station en post-traitement (jamais 3 bbox séparées = 3× le coût).
+    bbox_lat_min: float = Field(default=48.65, alias="CT_BBOX_LAT_MIN")
+    bbox_lon_min: float = Field(default=2.18, alias="CT_BBOX_LON_MIN")
+    bbox_lat_max: float = Field(default=49.09, alias="CT_BBOX_LAT_MAX")
+    bbox_lon_max: float = Field(default=2.53, alias="CT_BBOX_LON_MAX")
 
-    # --- Cadence micro-batch ---
-    poll_interval_s: int = Field(default=12, alias="CT_POLL_INTERVAL_S")
+    # --- Cadence micro-batch (s) : 30 s ≈ 2 880 appels/j < plafond 4000 crédits ---
+    poll_interval_s: int = Field(default=30, alias="CT_POLL_INTERVAL_S")
+
+    # --- Budget crédits OpenSky (allocation QUOTIDIENNE, header x-rate-limit-remaining) ---
+    daily_credit_budget: int = Field(default=4000, alias="CT_DAILY_CREDIT_BUDGET")
+    # Plancher de sécurité : le poller s'arrête si le restant passe sous ce seuil.
+    credit_floor: int = Field(default=200, alias="CT_CREDIT_FLOOR")
 
     # --- Mode d'ingestion : "live" (API réelle) | "replay" (snapshots) ---
     ingest_mode: str = Field(default="replay", alias="CT_INGEST_MODE")
@@ -71,6 +98,10 @@ class Settings(BaseSettings):
         "protocol/openid-connect/token"
     )
 
+    # --- Bruitparif Survol (token public scrapé depuis la page de l'app) ---
+    bruitparif_app_url: str = "https://survol.bruitparif.fr/"
+    bruitparif_api_url: str = "https://rumeurengine.bruitparif.fr"
+
     @property
     def bbox(self) -> BoundingBox:
         return BoundingBox(
@@ -79,6 +110,10 @@ class Settings(BaseSettings):
             lat_max=self.bbox_lat_max,
             lon_max=self.bbox_lon_max,
         )
+
+    @property
+    def stations(self) -> tuple[Station, ...]:
+        return STATIONS
 
     @property
     def has_credentials(self) -> bool:
@@ -102,11 +137,21 @@ class Settings(BaseSettings):
         return self.data_path / "samples"
 
     @property
+    def real_survol_dir(self) -> Path:
+        """JSON bruts d'événements Bruitparif (gitignoré : donnée tierce brute)."""
+        return self.data_path / "real_survol"
+
+    @property
+    def noise_events_dir(self) -> Path:
+        """Landing zone Parquet des événements de survol (partition station/date)."""
+        return self.raw_dir / "noise_events"
+
+    @property
     def duckdb_path(self) -> Path:
         return self.curated_dir / "ciel_tranquille.duckdb"
 
     def ensure_dirs(self) -> None:
-        for d in (self.raw_dir, self.curated_dir, self.samples_dir):
+        for d in (self.raw_dir, self.curated_dir, self.samples_dir, self.real_survol_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 

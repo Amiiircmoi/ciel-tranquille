@@ -51,3 +51,7 @@ models/*.json
 
 # Notebooks
 notebooks/
+
+# Données tierces brutes (Bruitparif/OpenSky) — local uniquement
+data/real_survol/
+data/real/

@@ -1,11 +1,20 @@
-# Ordonnancement micro-batch de Ciel Tranquille via cron (déploiement VPS solo).
-# Un cycle (ingestion + reconstruction curated) toutes les 5 minutes.
-# Installer avec :  crontab deploy/crontab.example
+# Ordonnancement de Ciel Tranquille (déploiement VPS solo) — alternative à systemd.
+# Deux flux co-localisés :
+#   1. TRAFIC (OpenSky) — poller forward continu à 30 s. Ce n'est PAS une tâche
+#      cron ponctuelle : c'est un service long. Préférer systemd
+#      (ciel-tranquille-forward.service). À défaut, le relancer au boot via @reboot.
+#   2. BRUIT (Bruitparif) — collecte journalière des événements de survol.
 #
-# Remarque : OpenSky free limite à ~1 req / 10 s ; le cycle ci-dessous fait
-# 5 micro-batches espacés de CT_POLL_INTERVAL_S, puis reconstruit la couche
-# curated. Pour un vrai temps réel push (limite assumée), il faudrait un broker
-# (cf. veille-techno.md).
+# Note : polling micro-batch assumé, pas de temps réel
+# push. Budget OpenSky QUOTIDIEN : 30 s ≈ 2880 appels/j < 4000 crédits ; arrêt
+# auto sous le plancher CT_CREDIT_FLOOR.
 
-CT_BATCHES=5
-*/5 * * * * /chemin/vers/ciel-tranquille/scripts/run_cycle.sh >> /var/log/ciel-tranquille.log 2>&1
+# 1. Poller forward au démarrage (si pas de systemd) — logge et redémarre via le shell.
+@reboot cd /opt/ciel-tranquille && ./scripts/run_forward.sh >> /var/log/ciel-tranquille-forward.log 2>&1
+
+# 2. Collecte bruit quotidienne (6h30), fenêtre de 2 jours + rechargement DuckDB.
+30 6 * * * cd /opt/ciel-tranquille && ./scripts/collect_noise.sh --days 2 >> /var/log/ciel-tranquille-noise.log 2>&1
+
+# (Optionnel) Cycle micro-batch « ingestion + curated » toutes les 5 min, si l'on
+# préfère un ordonnancement périodique plutôt que le poller forward continu :
+# */5 * * * * cd /opt/ciel-tranquille && CT_BATCHES=5 ./scripts/run_cycle.sh >> /var/log/ciel-tranquille.log 2>&1

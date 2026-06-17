@@ -75,11 +75,15 @@ class OpenSkyClient:
     testable sans dépendre de l'horloge réelle.
     """
 
-    def __init__(self, settings: Settings | None = None, clock=time.time):
+    def __init__(self, settings: Settings | None = None, clock=time.time, sleep=time.sleep):
         self.settings = settings or get_settings()
         self._clock = clock
+        self._sleep = sleep
         self._token: _Token | None = None
         self._client = httpx.Client(timeout=httpx.Timeout(15.0))
+        # Crédits OpenSky restants (header `x-rate-limit-remaining`) — allocation
+        # QUOTIDIENNE. Mis à jour à chaque appel ; lu par le poller (garde-fou budget).
+        self.last_rate_limit_remaining: int | None = None
 
     # ------------------------------------------------------------------ auth
     @retry(
@@ -115,6 +119,27 @@ class OpenSkyClient:
             self._token = self._fetch_token()
         return {"Authorization": f"Bearer {self._token.value}"}
 
+    # --------------------------------------------------------- rate-limiting
+    def _capture_rate_limit(self, resp: httpx.Response) -> None:
+        """Mémorise le solde de crédits quotidien (header `x-rate-limit-remaining`)."""
+        raw = resp.headers.get("x-rate-limit-remaining")
+        if raw is not None:
+            try:
+                self.last_rate_limit_remaining = int(raw)
+            except ValueError:
+                logger.debug("x-rate-limit-remaining illisible: %r", raw)
+
+    @staticmethod
+    def _retry_after_seconds(resp: httpx.Response, default: float = 10.0) -> float:
+        """Délai d'attente sur 429, lu depuis `Retry-After` (secondes), borné."""
+        raw = resp.headers.get("retry-after")
+        if raw:
+            try:
+                return max(1.0, min(float(raw), 120.0))
+            except ValueError:
+                pass
+        return default
+
     # ----------------------------------------------------------------- states
     @retry(
         retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
@@ -126,6 +151,8 @@ class OpenSkyClient:
         """Récupère un *snapshot* d'états dans la bounding box configurée.
 
         Retourne le JSON brut OpenSky : ``{"time": int, "states": [[...], ...]}``.
+        Met à jour `last_rate_limit_remaining` (budget crédits) à chaque appel et
+        respecte `Retry-After` sur un 429 avant de laisser tenacity rejouer.
         """
         header = self._auth_header()
         resp = self._client.get(
@@ -133,8 +160,16 @@ class OpenSkyClient:
             params=self.settings.bbox.as_params(),
             headers=header,
         )
+        self._capture_rate_limit(resp)
         if resp.status_code == 429:
-            logger.warning("OpenSky rate-limit (429) — backoff via tenacity.")
+            wait_s = self._retry_after_seconds(resp)
+            logger.warning(
+                "OpenSky rate-limit (429) — Retry-After=%.0fs, crédits restants=%s ; "
+                "back-off puis retry exponentiel.",
+                wait_s,
+                self.last_rate_limit_remaining,
+            )
+            self._sleep(wait_s)
             resp.raise_for_status()
         if resp.status_code == 401:
             # token périmé entre-temps : on l'invalide et on laisse tenacity rejouer

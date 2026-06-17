@@ -1,0 +1,13 @@
+# systemd timer — collecte bruit Bruitparif une fois par jour (le matin).
+# Les événements de survol sont publiés avec ~1 h de latence ; un passage
+# quotidien (fenêtre de 2 jours) suffit à une couverture complète (~50 évts/j/station).
+[Unit]
+Description=Timer Ciel Tranquille — collecte bruit quotidienne
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

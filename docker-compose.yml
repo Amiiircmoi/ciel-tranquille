@@ -1,35 +1,60 @@
-# Orchestration locale : un service pipeline (ingestion micro-batch) + le dashboard,
-# partageant un volume de données. Démontre la conteneurisation (BC2.5 C2).
+# Stack de COLLECTE SOUTENUE (post-validation Phase 1b) — pipelines conteneurisés.
+#
+# Pourquoi conteneuriser : empaqueter l'ingestion réelle
+# (poller OpenSky forward + collecteur Bruitparif) et le dashboard dans des images
+# reproductibles, lançables d'un `docker compose up -d` sur le VPS, isolées des
+# autres projets (réseau + nom de projet dédiés). Ce n'est pas un facilitateur de
+# la tâche d'ingestion en soi (le code tourne aussi nativement) : c'est la
+# garantie de **reproductibilité** et de **déploiement homogène**.
+#
+# Démo : `docker compose up -d` → poller + noise collectent (aucun port exposé,
+# trafic sortant uniquement), dashboard sur http://localhost:8520.
+name: ciel-tranquille
+
 services:
-  pipeline:
+  # --- Ingestion trafic : poller OpenSky forward continu (micro-batch 30 s) ---
+  poller:
     build: .
     image: ciel-tranquille:latest
     env_file:
       - .env
     environment:
-      CT_INGEST_MODE: ${CT_INGEST_MODE:-replay}
+      CT_INGEST_MODE: live   # collecte réelle (override du défaut .env si besoin)
+    # Aucun port exposé : trafic SORTANT uniquement (API OpenSky).
+    command: ["python", "-m", "ciel_tranquille.ingest.poller", "--forward"]
     volumes:
       - ct-data:/app/data
-      - ct-models:/app/models
-    # Bootstrap (synth -> curated -> modèle) puis boucle de micro-batches.
-    command: >
-      bash -c "scripts/bootstrap_demo.sh &&
-               while true; do
-                 python -m ciel_tranquille.ingest.poller --batches 5 --no-sleep || true;
-                 sleep 300;
-               done"
+    restart: unless-stopped
 
+  # --- Ingestion bruit : collecteur Bruitparif (fenêtres horaires, 1×/jour) ---
+  noise:
+    build: .
+    image: ciel-tranquille:latest
+    env_file:
+      - .env
+    # Aucun port exposé : trafic SORTANT uniquement (API Bruitparif).
+    # Boucle quotidienne : (re)collecte 2 jours (latence de publication) puis dort.
+    command: >
+      bash -c "while true; do
+                 python -m ciel_tranquille.ingest.noise_collector --days 2 || true;
+                 sleep 86400;
+               done"
+    volumes:
+      - ct-data:/app/data
+    restart: unless-stopped
+
+  # --- Restitution : dashboard Streamlit (seul service avec un port hôte) ---
   dashboard:
     build: .
     image: ciel-tranquille:latest
     depends_on:
-      - pipeline
+      - poller
+    # 8501 (défaut Streamlit) laissé libre ; port hôte 8520 vérifié disponible.
     ports:
-      - "8501:8501"
+      - "8520:8501"
     volumes:
       - ct-data:/app/data
-      - ct-models:/app/models
+    restart: unless-stopped
 
 volumes:
   ct-data:
-  ct-models:

@@ -12,9 +12,10 @@ COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --upgrade pip && pip install .
 
-# Code applicatif + données échantillons.
+# Code applicatif + données échantillons + modèle packagé (dashboard autonome).
 COPY dashboard ./dashboard
 COPY data/samples ./data/samples
+COPY models ./models
 COPY scripts ./scripts
 RUN chmod +x scripts/*.sh
 

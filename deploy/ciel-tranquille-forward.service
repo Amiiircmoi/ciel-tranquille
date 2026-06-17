@@ -1,0 +1,24 @@
+# systemd service — poller OpenSky *forward* continu (collecte co-localisée).
+# Tourne en permanence à la cadence CT_POLL_INTERVAL_S (30 s) ; back-off propre
+# sur 429 et arrêt automatique sous le plancher de crédits (CT_CREDIT_FLOOR).
+# Installer : copier dans /etc/systemd/system/ puis
+#   systemctl enable --now ciel-tranquille-forward.service
+[Unit]
+Description=Ciel Tranquille — poller OpenSky forward (micro-batch 30s)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ciel-tranquille
+EnvironmentFile=/opt/ciel-tranquille/.env
+ExecStart=/opt/ciel-tranquille/scripts/run_forward.sh
+User=ciel
+# Reprise auto après coupure réseau / redémarrage. Le budget crédits étant
+# QUOTIDIEN, un arrêt sur plancher est rare (2880 < 4000) ; sinon le service
+# retente et reprend une fois le quota réinitialisé.
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

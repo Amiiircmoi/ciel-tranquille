@@ -24,6 +24,9 @@ class BatchMetric:
     bytes_written: int
     ok: bool
     error: str | None = None
+    # Crédits OpenSky restants après l'appel (header `x-rate-limit-remaining`).
+    # None en replay/offline. Permet de suivre la consommation du budget quotidien.
+    credits_remaining: int | None = None
 
     @property
     def throughput_rows_per_s(self) -> float:
