@@ -23,7 +23,7 @@ services:
     # Aucun port exposé : trafic SORTANT uniquement (API OpenSky).
     command: ["python", "-m", "ciel_tranquille.ingest.poller", "--forward"]
     volumes:
-      - ct-data:/app/data
+      - ./data:/app/data   # bind mount hôte : la collecte alimente ./data/raw (lu par la validation/le gel)
     restart: unless-stopped
 
   # --- Ingestion bruit : collecteur Bruitparif (fenêtres horaires, 1×/jour) ---
@@ -40,7 +40,7 @@ services:
                  sleep 86400;
                done"
     volumes:
-      - ct-data:/app/data
+      - ./data:/app/data   # bind mount hôte : la collecte alimente ./data/raw (lu par la validation/le gel)
     restart: unless-stopped
 
   # --- Restitution : dashboard Streamlit (seul service avec un port hôte) ---
@@ -53,8 +53,5 @@ services:
     ports:
       - "8520:8501"
     volumes:
-      - ct-data:/app/data
+      - ./data:/app/data   # bind mount hôte : la collecte alimente ./data/raw (lu par la validation/le gel)
     restart: unless-stopped
-
-volumes:
-  ct-data:
