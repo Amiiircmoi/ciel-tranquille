@@ -7,8 +7,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from lib import model_payload, require_curated
 
-st.set_page_config(page_title="Prévision", page_icon="🤖", layout="wide")
-st.title("🤖 Prévision du niveau de bruit")
+st.set_page_config(page_title="Prévision", page_icon="📈", layout="wide")
+st.title("📈 Prévision du niveau de bruit")
 
 if not require_curated():
     st.stop()

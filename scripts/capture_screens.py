@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import argparse
 import re
-from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-OUT = Path(__file__).resolve().parents[1] / "outputs" / "captures"
+from ciel_tranquille.config import get_settings
+
+OUT = get_settings().output_path / "captures"
 
 
 def _settle(page, ms: int = 2500) -> None:

@@ -14,7 +14,7 @@ flowchart LR
     subgraph SRC["Sources"]
         OS["OpenSky API\n/states/all (OAuth2)"]
         RP["Snapshots enregistrés\n(mode replay)"]
-        BR["Mesures de bruit\n(CSV / synthétique)"]
+        BR["Mesures de bruit Bruitparif\n(Survol / synthétique)"]
     end
     subgraph ING["Ingestion micro-batch"]
         PO["Poller\nhttpx+tenacity, idempotent"]
@@ -125,6 +125,22 @@ Secrets OpenSky hors du code (`.env` gitignoré). Données de vol = techniques e
 publiques ; **agrégation spatiale** (stations de mesure, jamais un domicile) et
 minimisation des champs conservés.
 
+## Crédits & sources de données
+
+- **Bruitparif** — niveaux sonores mesurés via la plateforme
+  [Survol](https://survol.bruitparif.fr/), publiés sous
+  [Licence Ouverte / Open Licence Etalab v2.0](https://www.etalab.gouv.fr/licence-ouverte-open-licence/).
+  Les échantillons de bruit versionnés (`data/samples/bruit_survol.csv`) en sont dérivés
+  (attribution requise).
+- **The OpenSky Network** — positions d'aéronefs via l'API `/states/all`
+  ([opensky-network.org](https://opensky-network.org)), utilisée en mode *live* pour un
+  usage recherche / éducatif non commercial, conformément à ses conditions.
+  **Aucune donnée OpenSky brute n'est redistribuée ici** : le snapshot d'exemple
+  (`data/samples/opensky_snapshot.csv`) est **synthétique**, produit par
+  `scripts/gen_sample_snapshot.py`.
+  > Schäfer, Strohmeier, Lenders, Martinovic, Wilhelm — *Bringing Up OpenSky: A
+  > Large-scale ADS-B Sensor Network for Research*, ACM/IEEE IPSN 2014.
+
 ## Licence
 
-Projet personnel — usage portfolio.
+Code sous licence **MIT** — voir [LICENSE](LICENSE). © 2026 Amir ANCIAUX.

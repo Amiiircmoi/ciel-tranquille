@@ -94,7 +94,9 @@ def main():
     print(f"Événements bruit dans la fenêtre: {len(events)}")
 
     pairs = build_pairs(events, states, STATIONS_BY_ID, time_tol_s=45.0)
-    pairs.to_csv("outputs/phase1b_pairs.csv", index=False)
+    out_csv = settings.output_path / "phase1b_pairs.csv"
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    pairs.to_csv(out_csv, index=False)
 
     # (c) taux d'association
     with_candidate = pairs[pairs.n_candidates > 0]

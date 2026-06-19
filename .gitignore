@@ -22,6 +22,8 @@ __pycache__/
 # --- Données générées (landing / curated) — régénérables ---
 data/raw/
 data/curated/
+# Sorties annexes (captures, exports d'analyse) — défaut de CT_OUTPUT_DIR
+outputs/
 *.duckdb
 *.duckdb.wal
 

@@ -90,6 +90,8 @@ class Settings(BaseSettings):
 
     # --- Chemins ---
     data_dir: str = Field(default="data", alias="CT_DATA_DIR")
+    # Sorties annexes (captures, exports d'analyse) — routables hors dépôt via env.
+    output_dir: str = Field(default="outputs", alias="CT_OUTPUT_DIR")
 
     # --- Endpoints OpenSky ---
     opensky_states_url: str = "https://opensky-network.org/api/states/all"
@@ -123,6 +125,11 @@ class Settings(BaseSettings):
     def data_path(self) -> Path:
         p = REPO_ROOT / self.data_dir
         return p if p.is_absolute() else REPO_ROOT / self.data_dir
+
+    @property
+    def output_path(self) -> Path:
+        p = Path(self.output_dir)
+        return p if p.is_absolute() else REPO_ROOT / self.output_dir
 
     @property
     def raw_dir(self) -> Path:
