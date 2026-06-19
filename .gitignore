@@ -32,17 +32,9 @@ outputs/
 .idea/
 .vscode/
 
-# --- Hors périmètre du dépôt publié (gardés en local) ---
-# Fichiers locaux (non versionnés)
+# --- Fichiers locaux (non versionnés) ---
 legacy/
-# Local
-
-# Documents locaux
 *.pdf
-# Notes
-
-# Local
-
 
 # --- Artefacts régénérables (via make demo / make train) ---
 # généré par ct-synth (les CSV réels restent versionnés)
@@ -51,7 +43,6 @@ data/samples/bruit_synth.csv
 models/*.joblib
 models/*.json
 
-# Notebooks
 notebooks/
 
 # Données tierces brutes (Bruitparif/OpenSky) — local uniquement
