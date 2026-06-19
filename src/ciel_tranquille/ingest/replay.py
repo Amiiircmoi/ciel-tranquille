@@ -3,8 +3,10 @@
 Objectif : pouvoir développer, **tester** et démontrer le pipeline micro-batch
 sans dépendre de l'API OpenSky (ni de ses identifiants ni de son rate-limit).
 
-Honnêteté : on ne dispose que d'**un** snapshot réel (`opensky_snapshot.csv`).
-Le replay synthétise des snapshots successifs par *dead-reckoning* : chaque
+Honnêteté : la base est un snapshot **synthétique** de schéma identique à
+`/states/all` (`opensky_snapshot.csv`, généré par `scripts/gen_sample_snapshot.py`
+— aucune donnée OpenSky réelle n'est redistribuée). Le replay synthétise des
+snapshots successifs par *dead-reckoning* : chaque
 aéronef avance le long de son cap (`heading_deg`) à sa vitesse (`velocity_m_s`)
 pendant l'intervalle de polling. C'est **déterministe** (aucune source
 aléatoire) → mêmes entrées ⇒ mêmes sorties, idéal pour la CI.
