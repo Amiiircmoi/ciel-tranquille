@@ -168,9 +168,11 @@ outillage supplémentaire.
 
 ### b. Hôte sans cron — ordonnanceurs conteneurisés
 
-Debian n'installe plus cron par défaut, et créer une tâche système demande des
-droits qu'un compte applicatif n'a pas forcément. Deux services du compose font
-le même travail **sans aucun privilège** :
+Debian 13 n'installe pas cron par défaut, et créer une tâche système ou activer
+le *lingering* systemd demande des droits qu'un compte applicatif n'a pas
+forcément (constaté sur la cible de déploiement : ni `cron`, ni `crontab`, ni
+`sudo` sans mot de passe). Deux services du compose font le même travail **sans
+aucun privilège** :
 
 ```bash
 docker compose -f compose.prod.yaml up -d compact-scheduler status-scheduler
