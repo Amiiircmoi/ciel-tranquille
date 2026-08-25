@@ -233,31 +233,49 @@ def _load_states_hour(settings: Settings, start_ts: int, end_ts: int) -> pd.Data
 
 
 def count_pairs_for_hour(settings: Settings, date_str: str, hour_str: str) -> dict:
-    """Compte les paires propres d'une heure figée (événements ↔ aéronefs)."""
+    """Compte les paires propres d'une heure figée (événements ↔ aéronefs).
+
+    Le dénominateur ne retient que les événements des stations **actives**. Les
+    partitions d'une station retirée de la liste (station en panne, campagne
+    terminée) restent sur disque : les compter alors qu'aucun appariement ne sera
+    jamais tenté pour elles écraserait le taux d'association. Mesuré sur la
+    collecte de juin, l'écart n'est pas anecdotique : 49 % avec les événements
+    d'une station retirée au dénominateur, 97 % sans.
+    """
     start_ts = calendar.timegm(time.strptime(f"{date_str} {hour_str}", "%Y-%m-%d %H"))
     end_ts = start_ts + SECONDS_PER_HOUR
+    vide = {"events": 0, "pairs": 0, "events_stations_inactives": 0}
 
     events = _noise_events_frame(settings, date_str)
     if events.empty or "max_ts_unix" not in events.columns:
-        return {"events": 0, "pairs": 0}
+        return vide
     events = events[events["max_ts_unix"].between(start_ts, end_ts)]
     if events.empty:
-        return {"events": 0, "pairs": 0}
-
-    states = _load_states_hour(settings, start_ts, end_ts)
-    if states.empty:
-        return {"events": int(len(events)), "pairs": 0}
+        return vide
 
     stations = {st.measurement_id: st for st in settings.stations}
     known = events[events["station"].isin(stations)]
+    hors_perimetre = int(len(events) - len(known))
     if known.empty:
-        return {"events": int(len(events)), "pairs": 0}
+        return {"events": 0, "pairs": 0, "events_stations_inactives": hors_perimetre}
+
+    states = _load_states_hour(settings, start_ts, end_ts)
+    if states.empty:
+        return {
+            "events": int(len(known)),
+            "pairs": 0,
+            "events_stations_inactives": hors_perimetre,
+        }
 
     pairs = build_pairs(known, states, stations)
     clean = pairs[
         pairs["slant_km"].notna() & (pairs["slant_km"] <= settings.pairs_max_slant_km)
     ]
-    return {"events": int(len(events)), "pairs": int(len(clean))}
+    return {
+        "events": int(len(known)),
+        "pairs": int(len(clean)),
+        "events_stations_inactives": hors_perimetre,
+    }
 
 
 def _load_progress(settings: Settings) -> dict:
@@ -318,6 +336,9 @@ def update_pairs(
     progress["totals"] = {
         "hours_counted": len(hours),
         "events": total_events,
+        "events_stations_inactives": sum(
+            h.get("events_stations_inactives", 0) for h in hours.values()
+        ),
         "clean_pairs": total_pairs,
         "association_rate": round(total_pairs / total_events, 3) if total_events else None,
         "updated_at_unix": now,
@@ -326,6 +347,7 @@ def update_pairs(
     return {
         "clean_pairs_total": total_pairs,
         "events_counted": total_events,
+        "events_stations_inactives": progress["totals"]["events_stations_inactives"],
         "association_rate": progress["totals"]["association_rate"],
         "hours_counted": len(hours),
         "hours_pending": max(0, len(pending) - max_hours),

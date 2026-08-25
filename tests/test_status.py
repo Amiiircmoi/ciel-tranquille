@@ -344,3 +344,51 @@ def test_hourly_rate_counts_landing_only(settings):
     state = status.collection_state(settings, now)
     assert state["snapshots_last_hour"] == 2
     assert state["snapshots_in_landing"] == 2
+
+
+def test_association_rate_ignores_events_of_inactive_stations(settings, tmp_path):
+    """Une station retirée de la liste ne doit pas écraser le taux d'association.
+
+    Ses partitions restent sur disque, mais aucun appariement ne sera tenté pour
+    elle. La compter au dénominateur ferait passer un taux réel de 97 % pour 49 %.
+    """
+    import json as _json
+
+    autre = "94290-STATION-RETIREE"
+    path = tmp_path / "stations.json"
+    path.write_text(
+        _json.dumps(
+            {
+                "active": [STATION.measurement_id],
+                "stations": [
+                    {
+                        "measurement_id": STATION.measurement_id,
+                        "latitude": STATION.latitude,
+                        "longitude": STATION.longitude,
+                        "airport": "CDG",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings.stations_file = str(path)
+
+    _seed_snapshots(
+        settings,
+        [NOON_UTC + i * 30 for i in range(120)],
+        lat=STATION.latitude + 0.002,
+        lon=STATION.longitude,
+    )
+    _seed_noise_events(settings, "2026-08-25", [_noise_event(1, NOON_UTC + 300)])
+    # Partition d'une station qui n'est plus collectée.
+    part = settings.noise_events_dir / f"station={autre}" / "date=2026-08-25"
+    part.mkdir(parents=True, exist_ok=True)
+    rows = [dict(_noise_event(900 + k, NOON_UTC + 400 + k), station=autre) for k in range(9)]
+    pq.write_table(pa.Table.from_pylist(rows), part / "events.parquet")
+
+    result = status.update_pairs(settings, NOON_UTC + 12 * 3600)
+    assert result["events_counted"] == 1          # seule la station active compte
+    assert result["events_stations_inactives"] == 9
+    assert result["clean_pairs_total"] == 1
+    assert result["association_rate"] == 1.0      # et non 0.1
