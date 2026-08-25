@@ -44,6 +44,7 @@ import pandas as pd
 from ciel_tranquille.compact import SECONDS_PER_HOUR, SNAPSHOT_RE, hour_key
 from ciel_tranquille.config import Settings, StationConfigError, get_settings
 from ciel_tranquille.monitoring.heartbeat import read_heartbeat, write_json_atomic
+from ciel_tranquille.monitoring.logging_setup import configure_logging
 from ciel_tranquille.storage.duck import states_globs, states_roots
 from ciel_tranquille.transform.colocate import build_pairs
 
@@ -460,25 +461,40 @@ def write_status(
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging("status")
     parser = argparse.ArgumentParser(description="Écrit status/status.json (supervision).")
     parser.add_argument("--no-pairs", action="store_true", help="Ne pas compter les paires.")
     parser.add_argument("--recount", action="store_true", help="Recompter toutes les heures.")
     parser.add_argument("--print", action="store_true", help="Afficher le JSON produit.")
+    parser.add_argument(
+        "--every",
+        type=float,
+        default=None,
+        help="Boucler en attendant N secondes entre deux rapports (ordonnanceur "
+        "conteneurisé ; sans cette option, un seul passage).",
+    )
     args = parser.parse_args(argv)
 
-    payload = write_status(with_pairs=not args.no_pairs, recount_pairs=args.recount)
-    if args.print:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-    else:
-        print(
-            f"{payload['verdict']} — dernier snapshot {payload['collecte']['last_snapshot_age_s']} s, "
-            f"{payload['collecte']['snapshots_last_hour']} snapshots/h, "
-            f"crédits={payload['credits']['remaining']}, "
-            f"bruit du jour={payload['bruit']['events_today']}, "
-            f"paires={payload['paires'].get('clean_pairs_total')}"
-        )
-    return 0 if payload["verdict"] == VERDICT_OK else 1
+    while True:
+        try:
+            payload = write_status(with_pairs=not args.no_pairs, recount_pairs=args.recount)
+            resume = (
+                f"{payload['verdict']} — dernier snapshot "
+                f"{payload['collecte']['last_snapshot_age_s']} s, "
+                f"{payload['collecte']['snapshots_last_hour']} snapshots/h, "
+                f"crédits={payload['credits']['remaining']}, "
+                f"bruit du jour={payload['bruit']['events_today']}, "
+                f"paires={payload['paires'].get('clean_pairs_total')}"
+            )
+            logger.info("%s | controles en echec : %s", resume, payload["failed_checks"])
+            if args.every is None:
+                print(json.dumps(payload, ensure_ascii=False, indent=2) if args.print else resume)
+                return 0 if payload["verdict"] == VERDICT_OK else 1
+        except Exception:  # noqa: BLE001 — un passage raté ne tue pas l'ordonnanceur
+            logger.exception("Passage de supervision en échec.")
+            if args.every is None:
+                return 1
+        time.sleep(args.every)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ import pyarrow.parquet as pq
 from ciel_tranquille.config import Settings, Station, StationConfigError, get_settings
 from ciel_tranquille.ingest.bruitparif_client import BruitparifClient, BruitparifRateLimited
 from ciel_tranquille.monitoring.heartbeat import write_json_atomic
+from ciel_tranquille.monitoring.logging_setup import configure_logging
 from ciel_tranquille.storage.duck import connect
 
 logger = logging.getLogger(__name__)
@@ -444,7 +445,7 @@ def load_to_duckdb(settings: Settings | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging("noise")
     parser = argparse.ArgumentParser(description="Collecteur d'événements de survol Bruitparif.")
     parser.add_argument("--days", type=int, default=14, help="Nombre de jours à remonter.")
     parser.add_argument("--end-day", type=str, default=None, help="Dernier jour inclus (YYYY-MM-DD).")

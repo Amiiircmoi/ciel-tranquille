@@ -99,8 +99,49 @@ services:
           memory: "${CIEL_NOISE_MEMORY:-512M}"
           pids: ${CIEL_PIDS_LIMIT:-128}
 
-  # --- Compaction horaire (cron) --------------------------------------------
-  # Sans elle, six jours de collecte laissent plus de 17 000 petits Parquet.
+  # --- Ordonnanceurs -------------------------------------------------------
+  # Pourquoi conteneurisés plutôt qu'en cron sur l'hôte : la cible de déploiement
+  # n'a ni cron installé ni sudo pour l'installer. Ces deux services ne demandent
+  # aucun privilège, survivent à la déconnexion comme au redémarrage (le moteur
+  # de conteneurs les relance), et journalisent dans le volume de données.
+  # Sur un hôte doté de cron, préférer les deux lignes de `deploy/DEPLOIEMENT.md`
+  # et laisser ces services à l'arrêt.
+  compact-scheduler:
+    <<: *collector
+    container_name: ciel-compact-scheduler
+    command:
+      - python
+      - -m
+      - ciel_tranquille.compact
+      - --every
+      - "${CIEL_COMPACT_INTERVAL_S:-3600}"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "${CIEL_COMPACT_CPUS:-1.00}"
+          memory: "${CIEL_COMPACT_MEMORY:-1G}"
+          pids: ${CIEL_PIDS_LIMIT:-128}
+
+  status-scheduler:
+    <<: *collector
+    container_name: ciel-status-scheduler
+    command:
+      - python
+      - -m
+      - ciel_tranquille.status
+      - --every
+      - "${CIEL_STATUS_INTERVAL_S:-900}"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "${CIEL_STATUS_CPUS:-1.00}"
+          memory: "${CIEL_STATUS_MEMORY:-1G}"
+          pids: ${CIEL_PIDS_LIMIT:-128}
+
+  # --- Passages ponctuels (cron de l'hôte, ou diagnostic manuel) -------------
+  # Sans compaction, six jours de collecte laissent plus de 17 000 petits Parquet.
   compact:
     <<: *collector
     command: ["python", "-m", "ciel_tranquille.compact"]

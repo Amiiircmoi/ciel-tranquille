@@ -209,6 +209,10 @@ class Settings(BaseSettings):
     credit_floor: int = Field(default=200, alias="CT_CREDIT_FLOOR")
     # Cadence plafond (s) quand le garde-fou budget ralentit la collecte.
     max_poll_interval_s: int = Field(default=300, alias="CIEL_MAX_POLL_INTERVAL_S")
+    # Au plancher, délai avant de relire le solde. Le quota OpenSky se
+    # réapprovisionne en cours de journée : attendre minuit ferait perdre des
+    # heures de collecte pour rien.
+    credit_recheck_s: int = Field(default=600, alias="CIEL_CREDIT_RECHECK_S")
 
     # --- OAuth2 : durée de vie du jeton (30 min côté OpenSky) et marge de refresh ---
     token_ttl_s: int = Field(default=1800, alias="CIEL_TOKEN_TTL_S")
@@ -394,6 +398,11 @@ class Settings(BaseSettings):
         return self.data_path / "curated"
 
     @property
+    def logs_dir(self) -> Path:
+        """Journaux applicatifs, dans le volume : lisibles à côté des données."""
+        return self.data_path / "logs"
+
+    @property
     def status_dir(self) -> Path:
         """Supervision : heartbeat, status.json, avancement du comptage de paires."""
         return self.data_path / "status"
@@ -439,6 +448,7 @@ class Settings(BaseSettings):
             self.landing_dir,
             self.curated_dir,
             self.status_dir,
+            self.logs_dir,
             self.samples_dir,
             self.real_survol_dir,
         ):

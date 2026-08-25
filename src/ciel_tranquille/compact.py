@@ -38,6 +38,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ciel_tranquille.config import Settings, get_settings
+from ciel_tranquille.monitoring.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +240,7 @@ def compact(
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging("compact")
     parser = argparse.ArgumentParser(description="Compaction horaire des snapshots Parquet.")
     parser.add_argument(
         "--lag-hours",
@@ -257,17 +258,33 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Compacter aussi l'heure en cours — poller ARRÊTÉ uniquement (fin de collecte).",
     )
+    parser.add_argument(
+        "--every",
+        type=float,
+        default=None,
+        help="Boucler en attendant N secondes entre deux passages (ordonnanceur "
+        "conteneurisé ; sans cette option, un seul passage).",
+    )
     args = parser.parse_args(argv)
 
-    report = compact(
-        lag_h=args.lag_hours,
-        delete_sources=not args.keep_sources,
-        include_open_hours=args.include_open_hours,
-    )
-    print("Compaction terminée :")
-    for key, value in report.to_dict().items():
-        print(f"  {key}: {value}")
-    return 0 if not report.errors else 1
+    while True:
+        try:
+            report = compact(
+                lag_h=args.lag_hours,
+                delete_sources=not args.keep_sources,
+                include_open_hours=args.include_open_hours,
+            )
+            logger.info("compaction : %s", report.to_dict())
+            if args.every is None:
+                print("Compaction terminée :")
+                for key, value in report.to_dict().items():
+                    print(f"  {key}: {value}")
+                return 0 if not report.errors else 1
+        except Exception:  # noqa: BLE001 — un passage raté ne tue pas l'ordonnanceur
+            logger.exception("Passage de compaction en échec.")
+            if args.every is None:
+                return 1
+        time.sleep(args.every)
 
 
 if __name__ == "__main__":

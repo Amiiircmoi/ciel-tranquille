@@ -1,0 +1,5 @@
+2026-08-25 15:39:36,378 INFO __main__ compaction : {'hours_compacted': 0, 'hours_skipped_open': 1, 'files_merged': 0, 'files_removed': 0, 'rows': 0, 'bytes_before': 0, 'bytes_after': 0, 'compaction_ratio': 0.0, 'errors': []}
+2026-08-25 15:39:36,979 INFO __main__ compaction : {'hours_compacted': 0, 'hours_skipped_open': 1, 'files_merged': 0, 'files_removed': 0, 'rows': 0, 'bytes_before': 0, 'bytes_after': 0, 'compaction_ratio': 0.0, 'errors': []}
+2026-08-25 15:40:34,707 INFO __main__ compacté 2026-08-25 13h : 36 fichiers -> 1 (3379 lignes, 344 Ko -> 109 Ko)
+2026-08-25 15:40:34,708 INFO __main__ compaction : {'hours_compacted': 1, 'hours_skipped_open': 0, 'files_merged': 36, 'files_removed': 36, 'rows': 3379, 'bytes_before': 351773, 'bytes_after': 111594, 'compaction_ratio': 3.15, 'errors': []}
+2026-08-25 15:40:35,222 INFO __main__ compaction : {'hours_compacted': 0, 'hours_skipped_open': 0, 'files_merged': 0, 'files_removed': 0, 'rows': 0, 'bytes_before': 0, 'bytes_after': 0, 'compaction_ratio': 0.0, 'errors': []}

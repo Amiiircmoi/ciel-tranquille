@@ -36,6 +36,7 @@ from ciel_tranquille.config import Settings, StationConfigError, get_settings
 from ciel_tranquille.ingest.opensky_client import OpenSkyClient, OpenSkyError, states_to_records
 from ciel_tranquille.ingest.replay import replay_snapshots
 from ciel_tranquille.monitoring.heartbeat import Heartbeat, write_heartbeat
+from ciel_tranquille.monitoring.logging_setup import configure_logging
 from ciel_tranquille.monitoring.metrics import BatchMetric, MetricsLogger
 
 logger = logging.getLogger(__name__)
@@ -404,13 +405,20 @@ def run_forward(
                         settings.credit_floor,
                     )
                     break
-                # Le budget est QUOTIDIEN : sortir du process ferait redémarrer le
-                # conteneur en boucle, chaque redémarrage brûlant un crédit pour
-                # reconstater le plancher. On attend la réinitialisation UTC.
-                wait_s = seconds_until_utc_midnight() + 60.0
+                # Deux raisons de ne pas sortir du process : le superviseur de
+                # conteneurs le relancerait aussitôt, brûlant un crédit à chaque
+                # redémarrage pour reconstater le plancher ; et le solde OpenSky
+                # se **réapprovisionne** en cours de journée (observé en direct :
+                # remontée de +24 après 22 appels). Sortir, ou dormir jusqu'à
+                # minuit, ferait perdre des heures de collecte alors que le quota
+                # est déjà revenu. On patiente donc par paliers, et le prochain
+                # appel relit le solde réel.
+                wait_s = min(
+                    float(settings.credit_recheck_s), seconds_until_utc_midnight() + 60.0
+                )
                 logger.warning(
-                    "Plancher crédits atteint (%s <= %s) — pause jusqu'à la "
-                    "réinitialisation quotidienne (%.0f min).",
+                    "Plancher crédits atteint (%s <= %s) — pause de %.0f min avant "
+                    "nouvelle lecture du solde.",
                     credits,
                     settings.credit_floor,
                     wait_s / 60.0,
@@ -441,7 +449,7 @@ def _interruptible_sleep(seconds: float, stop: dict, sleep=time.sleep) -> None:
 def main(argv: list[str] | None = None) -> int:
     from ciel_tranquille.ingest.stations import StationValidationError
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging("poller")
     parser = argparse.ArgumentParser(description="Poller micro-batch Ciel Tranquille.")
     parser.add_argument("--batches", type=int, default=5, help="Nombre de micro-batches.")
     parser.add_argument("--no-sleep", action="store_true", help="Pas d'attente entre batches.")

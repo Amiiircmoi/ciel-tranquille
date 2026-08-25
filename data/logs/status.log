@@ -1,0 +1,2 @@
+2026-08-25 15:30:49,870 INFO __main__ OK — dernier snapshot 31.8 s, 18 snapshots/h, crédits=3979, bruit du jour=1428, paires=None | controles en echec : []
+2026-08-25 15:40:36,894 INFO __main__ KO — dernier snapshot 68.7 s, 0 snapshots/h, crédits=3986, bruit du jour=1981, paires=None | controles en echec : ['debit_horaire']

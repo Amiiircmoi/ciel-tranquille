@@ -145,21 +145,44 @@ docker compose -f compose.prod.yaml run --rm status
 Attendu : `OK`, un âge de snapshot inférieur à 60 s, et un `credits_remaining`
 qui décroît d'une unité par tick.
 
-## 9. Ordonnancement horaire (cron de l'hôte)
+## 9. Ordonnancement : compaction horaire et statut au quart d'heure
 
-Deux lignes. `crontab -e` :
+Deux tâches à planifier. Choisissez selon ce dont dispose l'hôte.
+
+### a. Hôte avec cron — deux lignes
+
+`crontab -e` :
 
 ```cron
 # Compaction horaire des snapshots (évite des dizaines de milliers de fichiers)
-7 * * * * cd <chemin-du-depot> && docker compose -f compose.prod.yaml run --rm compact >> <chemin-des-logs>/compact.log 2>&1
+7 * * * * cd <chemin-du-depot> && docker compose -f compose.prod.yaml run --rm compact >> <chemin-des-donnees>/logs/compact.log 2>&1
 
-# Rapport de supervision (status.json + cumul de paires propres)
-17 * * * * cd <chemin-du-depot> && docker compose -f compose.prod.yaml run --rm status >> <chemin-des-logs>/status.log 2>&1
+# Rapport de supervision, toutes les 15 minutes
+*/15 * * * * cd <chemin-du-depot> && docker compose -f compose.prod.yaml run --rm status >> <chemin-des-donnees>/logs/status.log 2>&1
 ```
 
-Décalage volontaire : la compaction passe d'abord, le statut lit ensuite un
-état stabilisé. Le service `status` sort en **code 1 quand le verdict est KO** —
-de quoi déclencher un mail cron sans outillage supplémentaire.
+Décalage volontaire à la minute 7 : la compaction passe avant le statut du
+quart d'heure suivant, qui lit alors un état stabilisé. Le service `status` sort
+en **code 1 quand le verdict est KO** — de quoi déclencher un mail cron sans
+outillage supplémentaire.
+
+### b. Hôte sans cron — ordonnanceurs conteneurisés
+
+Debian n'installe plus cron par défaut, et créer une tâche système demande des
+droits qu'un compte applicatif n'a pas forcément. Deux services du compose font
+le même travail **sans aucun privilège** :
+
+```bash
+docker compose -f compose.prod.yaml up -d compact-scheduler status-scheduler
+```
+
+Ils bouclent en interne (`--every`), survivent à la déconnexion comme au
+redémarrage de la machine (`restart: unless-stopped`), et journalisent dans
+`<chemin-des-donnees>/logs/`. Cadences réglables par `CIEL_COMPACT_INTERVAL_S`
+et `CIEL_STATUS_INTERVAL_S`.
+
+N'activez qu'**une** des deux méthodes : cumuler cron et ordonnanceurs ferait
+tourner deux compactions concurrentes sur les mêmes fichiers.
 
 ---
 
@@ -175,6 +198,7 @@ de quoi déclencher un mail cron sans outillage supplémentaire.
 | Volumétrie | `du -sh $CIEL_HOST_DATA_DIR/landing $CIEL_HOST_DATA_DIR/curated` |
 | Nombre de fichiers en landing | `find $CIEL_HOST_DATA_DIR/landing -name '*.parquet' \| wc -l` |
 | Logs du poller | `docker compose -f compose.prod.yaml logs --tail=100 poller` |
+| Journaux dans le volume | `tail -f $CIEL_HOST_DATA_DIR/logs/{poller,noise,compact,status}.log` |
 | Consommation réelle | `docker stats --no-stream ciel-poller ciel-noise` |
 
 ### Lecture des verdicts KO

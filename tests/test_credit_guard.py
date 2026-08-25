@@ -139,3 +139,35 @@ def test_poller_refuses_to_start_on_station_outside_bbox(settings, tmp_path):
     settings.stations_file = str(path)
     with pytest.raises(StationValidationError, match="hors bbox"):
         poller.preflight_stations(settings)
+
+
+def test_floor_pauses_by_steps_not_until_midnight(settings, monkeypatch):
+    """Au plancher, on repatiente par paliers : le quota OpenSky se recharge.
+
+    Observé en collecte réelle : le solde est remonté de +24 après 22 appels.
+    Dormir jusqu'à minuit ferait perdre des heures alors que le quota est revenu ;
+    sortir du process ferait redémarrer le conteneur, un crédit par redémarrage.
+    """
+    settings.credit_recheck_s = 600
+    waits: list[float] = []
+
+    class _Client:
+        last_rate_limit_remaining = 50  # sous le plancher (200)
+
+        def fetch_states(self):
+            return {"time": int(NOON_UTC), "states": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(poller, "OpenSkyClient", lambda *a, **k: _Client())
+    monkeypatch.setattr(poller, "preflight_stations", lambda *_a, **_k: None)
+    settings.ingest_mode = "live"
+    poller.run_forward(
+        settings=settings, max_batches=2, sleep=waits.append, validate_stations=False
+    )
+
+    # Une pause de palier (600 s), jamais une attente de plusieurs heures.
+    assert waits, "aucune pause enregistrée"
+    assert max(waits) <= 600
+    assert sum(waits) < 3600
