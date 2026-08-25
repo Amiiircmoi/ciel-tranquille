@@ -85,6 +85,17 @@ def nearest_airport(lat: float, lon: float) -> tuple[str, float]:
 
 
 # ------------------------------------------------------------------ candidats
+# Schéma réel de `/sites`, relevé sur la réponse de production :
+#   categories    : 'air' | 'route' | 'fer'   (PLURIEL — pas `category`)
+#   status        : 1 = « Mesure en cours », 0 = « Pas de mesure » (entier)
+#   permanent     : station permanente vs campagne temporaire
+#   last_available_data : horodatage ISO de la dernière mesure publiée
+_ACTIVE_STATUS_LABELS = ("mesure en cours",)
+# Au-delà, la station est déclarée active mais ne publie plus : inutile de la
+# sonder, l'appel serait gaspillé sur une IP partagée avec une production tierce.
+STALE_DATA_MAX_AGE_H = 48.0
+
+
 @dataclass(frozen=True)
 class SiteCandidate:
     """Station candidate issue de `/sites`, enrichie de son couloir."""
@@ -96,6 +107,9 @@ class SiteCandidate:
     airport: str
     distance_km: float
     listed_active: bool
+    last_data_iso: str | None = None
+    last_data_age_h: float | None = None
+    permanent: bool = True
 
     def to_station(self) -> Station:
         return Station(
@@ -114,19 +128,42 @@ def _first(payload: dict, *keys, default=None):
     return default
 
 
-def parse_sites(sites: list[dict], bbox: BoundingBox) -> list[SiteCandidate]:
-    """Filtre `/sites` : catégorie `air`, dans la bbox, sous un couloir.
+def _last_data_age_h(site: dict, now: datetime) -> tuple[str | None, float | None]:
+    """Fraîcheur déclarée de la station (`last_available_data`)."""
+    raw = _first(site, "last_available_data", "lastAvailableData")
+    if not raw:
+        return None, None
+    text = str(raw).strip().replace("Z", "+00:00")
+    if len(text) >= 5 and text[-5] in "+-" and text[-3] != ":":
+        text = text[:-2] + ":" + text[-2:]
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return str(raw), None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return str(raw), max(0.0, (now - parsed).total_seconds() / 3600.0)
+
+
+def parse_sites(
+    sites: list[dict], bbox: BoundingBox, now: datetime | None = None
+) -> list[SiteCandidate]:
+    """Filtre `/sites` : catégorie **air**, dans la bbox, sous un couloir.
 
     Le schéma de `/sites` n'est pas contractuel côté Bruitparif : on lit les clés
-    par tolérance (`measurement_id`/`id`, `latitude`/`lat`…) et on ignore les
-    entrées inexploitables plutôt que d'échouer sur un champ renommé.
+    par tolérance (`categories`/`category`, `measurement_id`/`id`, `latitude`/`lat`…)
+    et on ignore les entrées inexploitables plutôt que d'échouer sur un champ
+    renommé. La catégorie est en revanche **obligatoire** : le réseau mélange
+    observatoires aérien, ferroviaire et routier sur les mêmes communes, et sonder
+    une station ferroviaire pour des survols ne peut que gaspiller un appel.
     """
+    now = now or datetime.now(timezone.utc)
     out: list[SiteCandidate] = []
     for site in sites:
         if not isinstance(site, dict):
             continue
-        category = str(_first(site, "category", "type", default="")).lower()
-        if category and category != "air":
+        category = str(_first(site, "categories", "category", "type", default="")).lower()
+        if category != "air":
             continue
         mid = _first(site, "measurement_id", "measurementId", "site", "id")
         lat = _first(site, "latitude", "lat")
@@ -142,10 +179,15 @@ def parse_sites(sites: list[dict], bbox: BoundingBox) -> list[SiteCandidate]:
         airport, dist = nearest_airport(lat, lon)
         if dist > MAX_AIRPORT_DISTANCE_KM:
             continue
-        status = str(_first(site, "status", "state", default="")).lower()
-        listed_active = status in ("", "active", "actif", "on", "running", "true") or bool(
-            _first(site, "last_available_data", "lastAvailableData")
-        )
+        # `status` est un ENTIER (1 = mesure en cours) : le comparer à des
+        # chaînes comme « active » ne matcherait jamais, et une station éteinte
+        # depuis 2018 passerait pour disponible.
+        status = _first(site, "status", "state", default=None)
+        label = str(_first(site, "status_label", default="")).strip().lower()
+        declared = (status in (1, "1", True)) or label in _ACTIVE_STATUS_LABELS
+        last_iso, age_h = _last_data_age_h(site, now)
+        fresh = age_h is not None and age_h <= STALE_DATA_MAX_AGE_H
+        listed_active = bool(declared and fresh)
         # Le couloir est déduit de la plateforme la plus proche — sauf pour les
         # stations socle, dont l'étiquette est figée par l'historique déjà
         # collecté : la rebaptiser ici rendrait les agrégats incomparables.
@@ -158,6 +200,9 @@ def parse_sites(sites: list[dict], bbox: BoundingBox) -> list[SiteCandidate]:
                 airport=_SOCLE_AIRPORTS.get(str(mid), airport),
                 distance_km=round(dist, 2),
                 listed_active=listed_active,
+                last_data_iso=last_iso,
+                last_data_age_h=None if age_h is None else round(age_h, 1),
+                permanent=bool(_first(site, "permanent", default=True)),
             )
         )
     return out
@@ -215,6 +260,7 @@ class ProbeResult:
     label: str
     error: str | None = None
     saturated: bool = False
+    distance_km: float | None = None
 
     @property
     def responds(self) -> bool:
@@ -227,6 +273,7 @@ class ProbeResult:
             "longitude": self.longitude,
             "airport": self.airport,
             "label": self.label,
+            "distance_km": self.distance_km,
             f"events_{window_hours}h": self.events,
             f"usable_events_{window_hours}h": self.usable,
             # Au plafond de l'API, le compte est un PLANCHER : la station produit
@@ -304,6 +351,7 @@ def probe_stations(
                     ProbeResult(
                         cand.measurement_id, 0, 0, cand.latitude, cand.longitude,
                         cand.airport, cand.label, error=str(exc),
+                        distance_km=cand.distance_km,
                     )
                 )
                 continue
@@ -313,7 +361,7 @@ def probe_stations(
                 ProbeResult(
                     cand.measurement_id, len(events), len(usable),
                     cand.latitude, cand.longitude, cand.airport, cand.label,
-                    saturated=saturated,
+                    saturated=saturated, distance_km=cand.distance_km,
                 )
             )
             logger.info(
@@ -355,25 +403,57 @@ def _fetch_with_backoff(
     raise last if last else RuntimeError("Sondage en échec sans exception.")
 
 
+def _selection_key(result: ProbeResult) -> tuple:
+    """Ordre de mérite : rendement d'abord, puis PROXIMITÉ à la plateforme.
+
+    Le plafond de ~50 réponses par appel sature une bonne moitié des stations :
+    elles arrivent toutes ex æquo et le rendement ne les départage plus. Le
+    second critère est alors la distance à la plateforme, et ce n'est pas un
+    pis-aller. Une station lointaine qui entend 50 survols entend des avions
+    haut et loin : distance oblique élevée, plusieurs appareils audibles à la
+    fois, appariement ambigu. Une station sous l'axe entend le survol qui la
+    concerne. À rendement égal, la proximité est la meilleure paire.
+    """
+    return (-result.usable, result.distance_km if result.distance_km is not None else 1e9,
+            result.measurement_id)
+
+
 def select_active(
     results: list[ProbeResult],
     socle: tuple[Station, ...] = STATIONS,
     max_active: int = 10,
 ) -> list[str]:
-    """Liste active : stations socle d'abord, puis les meilleures par rendement.
+    """Liste active : socle d'abord, puis les meilleures, réparties sur les couloirs.
 
     Le socle (stations déjà validées par la collecte réelle) est conservé même si
     la fenêtre de sondage le place derrière : changer de stations socle en cours
-    de route casserait la comparabilité avec l'historique déjà collecté. Les
-    places restantes vont au rendement observé, plafond `max_active`.
+    de route casserait la comparabilité avec l'historique déjà collecté — mais
+    seulement s'il produit encore, une station muette n'étant retenue par rien.
+
+    Les places restantes sont servies **par couloir, à tour de rôle**. Concentrer
+    les dix stations sur CDG donnerait dix fois la même géométrie d'approche ;
+    l'intérêt d'élargir est de varier distances et azimuts, c'est-à-dire de donner
+    au modèle autre chose à apprendre que « proche = fort ».
     """
     responding = {r.measurement_id: r for r in results if r.responds and r.usable > 0}
     active: list[str] = [s.measurement_id for s in socle if s.measurement_id in responding]
-    for result in sorted(responding.values(), key=lambda r: (-r.usable, r.measurement_id)):
-        if len(active) >= max_active:
+
+    par_couloir: dict[str, list[ProbeResult]] = {}
+    for result in sorted(responding.values(), key=_selection_key):
+        if result.measurement_id in active:
+            continue
+        par_couloir.setdefault(result.airport, []).append(result)
+
+    while len(active) < max_active:
+        progressed = False
+        for code in AIRPORTS:
+            queue = par_couloir.get(code) or []
+            if not queue or len(active) >= max_active:
+                continue
+            active.append(queue.pop(0).measurement_id)
+            progressed = True
+        if not progressed:
             break
-        if result.measurement_id not in active:
-            active.append(result.measurement_id)
     return active[:max_active]
 
 
@@ -436,6 +516,61 @@ class StationValidationError(RuntimeError):
     """Une station active ne répond pas ou sort de la bbox : démarrage refusé."""
 
 
+# Écart au-delà duquel les coordonnées configurées et celles de `/sites` sont
+# jugées incompatibles. 50 m : bien au-delà de l'arrondi décimal, bien en deçà
+# d'un déplacement de station réel.
+COORD_DIVERGENCE_MAX_M = 50.0
+
+
+def check_coordinates(
+    stations: tuple[Station, ...],
+    sites: list[dict],
+    bbox: BoundingBox,
+    now: datetime | None = None,
+) -> list[str]:
+    """Compare les coordonnées configurées à celles publiées par `/sites`.
+
+    Retourne la liste des divergences (vide si tout concorde). On **ne corrige
+    jamais** en silence : les coordonnées de station sont l'origine du calcul de
+    distance oblique, donc de la cible du modèle. Les remplacer à la volée
+    changerait rétroactivement le sens des paires déjà collectées, sans que rien
+    ne l'indique. Une divergence est un fait à trancher par un humain.
+    """
+    published = {}
+    for cand in parse_sites(sites, bbox, now):
+        published[cand.measurement_id] = (cand.latitude, cand.longitude)
+    # `parse_sites` filtre sur la bbox et la catégorie : on complète avec le brut
+    # pour ne pas rater une station dont les coordonnées publiées sortent de la bbox.
+    for site in sites:
+        if not isinstance(site, dict):
+            continue
+        mid = _first(site, "measurement_id", "measurementId", "site", "id")
+        lat = _first(site, "latitude", "lat")
+        lon = _first(site, "longitude", "lon", "lng")
+        if mid is None or lat is None or lon is None:
+            continue
+        try:
+            published.setdefault(str(mid), (float(lat), float(lon)))
+        except (TypeError, ValueError):
+            continue
+
+    problems: list[str] = []
+    for station in stations:
+        coords = published.get(station.measurement_id)
+        if coords is None:
+            continue  # absence traitée ailleurs (la station ne répondra pas)
+        delta_m = _haversine_km(station.latitude, station.longitude, *coords) * 1000.0
+        if delta_m > COORD_DIVERGENCE_MAX_M:
+            problems.append(
+                f"{station.measurement_id} : coordonnées configurées "
+                f"({station.latitude}, {station.longitude}) vs /sites "
+                f"({coords[0]}, {coords[1]}) — écart {delta_m:.0f} m. "
+                "Tranchez explicitement : la distance oblique, donc la cible du "
+                "modèle, dépend de cette position. Aucune correction automatique."
+            )
+    return problems
+
+
 def validate_active_stations(
     settings: Settings | None = None,
     client: BruitparifClient | None = None,
@@ -469,6 +604,12 @@ def validate_active_stations(
         client = client or BruitparifClient(settings)
         start, end = probe_window(settings, now)
         try:
+            try:
+                problems.extend(check_coordinates(stations, client.fetch_sites(), bbox, now))
+            except BruitparifRateLimited as exc:
+                problems.append(f"429 pendant la validation ({exc}) — réessayer plus tard.")
+            except Exception as exc:  # noqa: BLE001 — /sites indisponible : on le signale
+                logger.warning("Contrôle des coordonnées impossible (/sites) : %s", exc)
             for index, station in enumerate(stations):
                 if index:
                     sleep(settings.polite_pause_s)

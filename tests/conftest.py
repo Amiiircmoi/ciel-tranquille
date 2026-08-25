@@ -21,6 +21,10 @@ def settings(tmp_path, monkeypatch):
     """Settings pointant vers un data_dir temporaire (aucun effet de bord réel)."""
     from ciel_tranquille.config import get_settings
 
+    # Neutralise le `.env` du poste : sans cela, un CIEL_DATA_DIR=/data destiné au
+    # conteneur ferait écrire la suite de tests hors du répertoire temporaire.
+    monkeypatch.setenv("CIEL_DATA_DIR", "")
+    monkeypatch.setenv("CIEL_STATIONS_FILE", "")
     monkeypatch.setenv("CT_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CT_INGEST_MODE", "replay")
     monkeypatch.setenv("CT_POLL_INTERVAL_S", "12")

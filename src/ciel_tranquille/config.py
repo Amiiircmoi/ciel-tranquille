@@ -290,17 +290,26 @@ class Settings(BaseSettings):
         """Fichier de stations effectif, par ordre de priorité.
 
         1. `CIEL_STATIONS_FILE` (explicite) ;
-        2. `$CIEL_DATA_DIR/stations.json` (produit par la découverte au déploiement,
+        2. `$CIEL_DATA_DIR/stations.json` (produit par le sondage au déploiement,
            seul emplacement inscriptible en conteneur) ;
-        3. `config/stations.json` livré avec le dépôt.
+        3. `config/stations.json` du dépôt, cherché à deux endroits :
+           l'arborescence source (`REPO_ROOT`) **et** le répertoire de travail.
+
+        Le double emplacement n'est pas une ceinture et bretelles : une fois le
+        paquet installé (image Docker), `REPO_ROOT` pointe dans `site-packages`,
+        pas sur le `/app` où la configuration a été copiée. Sans le repli sur le
+        répertoire de travail, le conteneur ne trouve aucune station et refuse de
+        démarrer.
         """
         if self.stations_file:
             return Path(self.stations_file)
-        discovered = self.data_path / "stations.json"
-        if discovered.exists():
-            return discovered
-        if REPO_STATIONS_FILE.exists():
-            return REPO_STATIONS_FILE
+        for candidate in (
+            self.data_path / "stations.json",
+            REPO_STATIONS_FILE,
+            Path.cwd() / "config" / "stations.json",
+        ):
+            if candidate.exists():
+                return candidate
         return None
 
     @property

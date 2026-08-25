@@ -44,7 +44,7 @@ import pandas as pd
 from ciel_tranquille.compact import SECONDS_PER_HOUR, SNAPSHOT_RE, hour_key
 from ciel_tranquille.config import Settings, StationConfigError, get_settings
 from ciel_tranquille.monitoring.heartbeat import read_heartbeat, write_json_atomic
-from ciel_tranquille.storage.duck import states_globs
+from ciel_tranquille.storage.duck import states_globs, states_roots
 from ciel_tranquille.transform.colocate import build_pairs
 
 logger = logging.getLogger(__name__)
@@ -54,16 +54,43 @@ VERDICT_KO = "KO"
 
 
 # --------------------------------------------------------------- observations
-def _iter_snapshot_ts(settings: Settings) -> list[int]:
-    """Horodatages des snapshots encore présents en landing (nom de fichier)."""
+def _iter_snapshot_ts(settings: Settings, landing_only: bool = False) -> list[int]:
+    """Horodatages des snapshots unitaires, d'après le nom de fichier.
+
+    `landing_only=True` restreint à la landing courante (débit de la dernière
+    heure : la compaction ne touche jamais aux heures récentes). Par défaut on
+    balaie **toutes** les racines d'états — y compris `raw/states/`, où dorment
+    les collectes antérieures au découpage `landing/`. Ne regarder que la landing
+    ferait silencieusement compter zéro paire sur un historique pourtant présent.
+    """
+    roots = [settings.landing_dir] if landing_only else states_roots(settings)
     out: list[int] = []
-    if not settings.landing_dir.exists():
-        return out
-    for path in settings.landing_dir.rglob("states_*.parquet"):
-        match = SNAPSHOT_RE.match(path.name)
-        if match:
-            out.append(int(match.group(1)))
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("states_*.parquet"):
+            match = SNAPSHOT_RE.match(path.name)
+            if match:
+                out.append(int(match.group(1)))
     return out
+
+
+def _compacted_hours(settings: Settings) -> set[tuple[str, str]]:
+    """Heures présentes sous forme compactée (`states_YYYYMMDDTHH.parquet`)."""
+    hours: set[tuple[str, str]] = set()
+    for path in settings.compacted_states_dir.rglob("states_*T*.parquet"):
+        raw = path.stem.split("_", 1)[-1]
+        if "T" in raw and len(raw) >= 11:
+            day, hour = raw.split("T", 1)
+            hours.add((f"{day[:4]}-{day[4:6]}-{day[6:8]}", hour[:2]))
+    return hours
+
+
+def snapshot_hours(settings: Settings) -> set[tuple[str, str]]:
+    """Toutes les heures UTC pour lesquelles des états existent, où qu'ils soient."""
+    hours = {hour_key(ts) for ts in _iter_snapshot_ts(settings)}
+    hours |= _compacted_hours(settings)
+    return hours
 
 
 def collection_state(settings: Settings, now: float) -> dict:
@@ -75,7 +102,8 @@ def collection_state(settings: Settings, now: float) -> dict:
     est toujours comptable depuis la landing.
     """
     beat = read_heartbeat(settings.heartbeat_path) or {}
-    snapshots = _iter_snapshot_ts(settings)
+    landing = _iter_snapshot_ts(settings, landing_only=True)
+    snapshots = landing or _iter_snapshot_ts(settings)
     last_ts = max(snapshots, default=None)
     beat_ts = beat.get("snapshot_ts")
     if beat_ts and (last_ts is None or beat_ts > last_ts):
@@ -89,8 +117,8 @@ def collection_state(settings: Settings, now: float) -> dict:
         "last_snapshot_ts": last_ts,
         "last_snapshot_age_s": None if last_ts is None else round(max(0.0, now - last_ts), 1),
         "heartbeat_age_s": None if beat_age is None else round(beat_age, 1),
-        "snapshots_last_hour": sum(1 for ts in snapshots if now - ts <= SECONDS_PER_HOUR),
-        "snapshots_in_landing": len(snapshots),
+        "snapshots_last_hour": sum(1 for ts in landing if now - ts <= SECONDS_PER_HOUR),
+        "snapshots_in_landing": len(landing),
         "poll_interval_s": beat.get("poll_interval_s"),
         "mode": beat.get("mode"),
     }
@@ -244,15 +272,7 @@ def _load_progress(settings: Settings) -> dict:
 
 def _closed_hours(settings: Settings, now: float, lag_h: int) -> list[tuple[str, str]]:
     """Heures dont les données bruit et trafic sont considérées complètes."""
-    hours: set[tuple[str, str]] = set()
-    for ts in _iter_snapshot_ts(settings):
-        hours.add(hour_key(ts))
-    for path in settings.compacted_states_dir.rglob("states_*T*.parquet"):
-        stem = path.stem  # states_YYYYMMDDTHH
-        raw = stem.split("_", 1)[-1]
-        if "T" in raw and len(raw) >= 11:
-            day, hour = raw.split("T", 1)
-            hours.add((f"{day[:4]}-{day[4:6]}-{day[6:8]}", hour[:2]))
+    hours = snapshot_hours(settings)
     cutoff = now - lag_h * SECONDS_PER_HOUR
     closed = []
     for date_str, hour_str in hours:

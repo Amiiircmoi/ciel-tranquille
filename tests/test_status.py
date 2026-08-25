@@ -286,3 +286,61 @@ def test_missing_station_config_is_a_failed_check_not_a_crash(settings, tmp_path
     assert payload["verdict"] == "KO"
     assert "config_stations" in payload["failed_checks"]
     assert payload["bruit"]["station_config_error"]
+
+
+# ------------------- régression : le comptage de paires ne doit pas court-circuiter
+def _seed_legacy_snapshots(settings, stamps, lat, lon):
+    """Écrit des snapshots dans la racine HISTORIQUE `raw/states/`."""
+    from ciel_tranquille.ingest.poller import write_batch
+
+    for ts in stamps:
+        write_batch([_state_record(ts, "bb0001", lat, lon)], settings.raw_dir / "states")
+
+
+def test_pairs_see_snapshots_left_in_the_legacy_root(settings):
+    """Des états présents hors `landing/` ne doivent pas donner zéro paire.
+
+    Régression : le comptage ne balayait que `landing/`. Un historique rangé sous
+    `raw/states/` — ce que produisent les collectes antérieures — rendait le
+    cumul de paires nul alors que les lecteurs, eux, voyaient bien les données.
+    Zéro par court-circuit est le pire résultat possible : indiscernable d'une
+    collecte qui n'apparie rien.
+    """
+    stamps = [NOON_UTC + i * 30 for i in range(120)]
+    _seed_legacy_snapshots(settings, stamps, STATION.latitude + 0.002, STATION.longitude)
+    _seed_noise_events(
+        settings,
+        "2026-08-25",
+        [_noise_event(1, NOON_UTC + 300), _noise_event(2, NOON_UTC + 900)],
+    )
+    assert status._iter_snapshot_ts(settings, landing_only=True) == []  # rien en landing
+
+    result = status.update_pairs(settings, NOON_UTC + 12 * 3600)
+    assert result["hours_counted"] == 1
+    assert result["clean_pairs_total"] == 2
+    assert result["events_counted"] == 2
+
+
+def test_pairs_see_compacted_hours(settings):
+    """Après compaction, les heures restent comptables (fichiers horaires)."""
+    from ciel_tranquille import compact
+
+    stamps = [NOON_UTC + i * 30 for i in range(120)]
+    _seed_snapshots(settings, stamps, lat=STATION.latitude + 0.002, lon=STATION.longitude)
+    _seed_noise_events(settings, "2026-08-25", [_noise_event(1, NOON_UTC + 300)])
+    compact.compact(settings=settings, lag_h=2, now=NOON_UTC + 6 * 3600)
+    assert list(settings.landing_dir.rglob("states_*.parquet")) == []  # tout compacté
+
+    result = status.update_pairs(settings, NOON_UTC + 12 * 3600)
+    assert result["hours_counted"] >= 1
+    assert result["clean_pairs_total"] == 1
+
+
+def test_hourly_rate_counts_landing_only(settings):
+    """Le débit horaire se lit sur la landing : la compaction n'y touche jamais."""
+    now = NOON_UTC + 3600
+    _seed_snapshots(settings, [now - 30, now - 60])
+    _seed_legacy_snapshots(settings, [now - 90], STATION.latitude, STATION.longitude)
+    state = status.collection_state(settings, now)
+    assert state["snapshots_last_hour"] == 2
+    assert state["snapshots_in_landing"] == 2
