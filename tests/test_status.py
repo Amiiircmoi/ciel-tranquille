@@ -47,6 +47,12 @@ def _seed_noise_events(settings, day: str, events: list[dict]) -> None:
     pq.write_table(table, part / f"events_{day}.parquet")
 
 
+def _write_noise_health(settings, payload):
+    from ciel_tranquille.monitoring.heartbeat import write_json_atomic
+
+    write_json_atomic(settings.noise_health_path, payload)
+
+
 def _noise_event(event_id: int, max_ts: float) -> dict:
     return {
         "station": STATION.measurement_id,
@@ -115,12 +121,8 @@ def test_noise_state_counts_today_only(settings):
 def test_verdict_ok_when_collection_is_healthy(settings, monkeypatch):
     monkeypatch.setenv("CIEL_STATIONS_FILE", "")
     now = NOON_UTC + 3600
-    _seed_snapshots(settings, [now - i * 30 for i in range(1, 20)])
+    _healthy_poller(settings, now)
     _seed_noise_events(settings, "2026-08-25", [_noise_event(1, now - 300)])
-    write_heartbeat(
-        settings.heartbeat_path,
-        Heartbeat(now - 20, now - 30, 40, 100, 3200, 30, "live", 1),
-    )
     payload = status.build_status(settings, now=now, with_pairs=False)
 
     assert payload["verdict"] == "OK"
@@ -209,19 +211,26 @@ def test_pairs_ignore_hours_that_are_not_settled_yet(settings):
 
 
 # ----------------------------- santé de la source bruit (contrôle DISTINCT)
-def _write_noise_health(settings, payload):
-    from ciel_tranquille.monitoring.heartbeat import write_json_atomic
+def _healthy_poller(settings, now, collecteur_vivant=True):
+    """Poller avion sain, et collecteur de bruit vivant par défaut.
 
-    write_json_atomic(settings.noise_health_path, payload)
-
-
-def _healthy_poller(settings, now):
-    """Poller avion parfaitement sain : isole l'effet des contrôles bruit."""
+    Les deux sources ont des contrôles distincts : pour isoler l'effet de l'une,
+    l'autre doit être saine, sinon le verdict échoue pour une raison étrangère
+    à ce que le test veut prouver.
+    """
     _seed_snapshots(settings, [now - i * 30 for i in range(1, 20)])
     write_heartbeat(
         settings.heartbeat_path,
         Heartbeat(now - 20, now - 30, 40, 100, 3200, 30, "live", 1),
     )
+    if collecteur_vivant:
+        _write_noise_health(
+            settings,
+            {
+                "last_run_unix": now - 600,
+                "token": {"ok": True, "checked_at_iso": "2026-08-25T13:00:00Z", "error": None},
+            },
+        )
 
 
 def test_broken_token_is_its_own_failed_check(settings):
@@ -244,16 +253,30 @@ def test_broken_token_is_its_own_failed_check(settings):
 
 
 def test_daytime_noise_silence_turns_the_verdict_ko(settings):
-    """Bruit muet depuis plus de 2 h en journée -> KO, même poller avion nominal."""
+    """Bruit muet au-delà du budget en journée -> KO, même poller avion nominal.
+
+    Le budget vaut cadence du collecteur + latence de publication (5 h par
+    défaut) : en deçà, le silence est normal et alerter serait un faux positif.
+    """
     now = NOON_UTC + 3600  # 13 h UTC : journée
     _healthy_poller(settings, now)
-    _seed_noise_events(settings, "2026-08-25", [_noise_event(1, now - 3 * 3600)])
+    silence = settings.noise_silence_budget_s + 3600
+    _seed_noise_events(settings, "2026-08-25", [_noise_event(1, now - silence)])
     payload = status.build_status(settings, now=now, with_pairs=False)
 
     assert payload["verdict"] == "KO"
     assert "bruit_recent" in payload["failed_checks"]
-    assert payload["bruit"]["last_event_age_s"] == 3 * 3600
+    assert payload["bruit"]["last_event_age_s"] == silence
     assert payload["collecte"]["snapshots_last_hour"] > 0  # le poller tourne
+
+
+def test_silence_within_the_budget_is_not_an_alert(settings):
+    """3 h de silence avec un collecteur à 3 h : normal, pas une panne."""
+    now = NOON_UTC + 3600
+    _healthy_poller(settings, now)
+    _seed_noise_events(settings, "2026-08-25", [_noise_event(1, now - 3 * 3600)])
+    payload = status.build_status(settings, now=now, with_pairs=False)
+    assert "bruit_recent" not in payload["failed_checks"]
 
 
 def test_recent_noise_keeps_the_verdict_ok(settings):
@@ -392,3 +415,55 @@ def test_association_rate_ignores_events_of_inactive_stations(settings, tmp_path
     assert result["events_stations_inactives"] == 9
     assert result["clean_pairs_total"] == 1
     assert result["association_rate"] == 1.0      # et non 0.1
+
+
+# ------------------ budget de silence coherent avec la cadence du collecteur
+def test_noise_silence_budget_accounts_for_collector_cadence(settings):
+    """Un seuil plus serré que la cadence du collecteur alerterait à chaque cycle.
+
+    Régression observée en production : collecteur toutes les 3 h + ~1 h de
+    latence de publication = âge du dernier événement montant à 4 h. Le seuil
+    de 2 h basculait KO avant chaque passage — une fausse alerte toutes les 3 h,
+    donc un canal de notification qu'on apprend à ignorer.
+    """
+    settings.noise_interval_s = 10800      # 3 h
+    settings.noise_publication_lag_s = 3600  # 1 h
+    settings.noise_max_silence_s = 7200    # 2 h, trop serré
+    assert settings.noise_silence_budget_s >= 10800 + 3600
+    assert settings.noise_silence_budget_s == 18000
+
+
+def test_stricter_silence_threshold_is_honoured_when_cadence_allows(settings):
+    """Collecteur horaire : un seuil serré redevient légitime."""
+    settings.noise_interval_s = 3600
+    settings.noise_publication_lag_s = 3600
+    settings.noise_max_silence_s = 14400
+    assert settings.noise_silence_budget_s == 14400
+
+
+def test_dead_noise_collector_is_its_own_check(settings):
+    """Signal direct : le collecteur ne tourne plus, indépendamment des données."""
+    now = NOON_UTC + 3600
+    _healthy_poller(settings, now)
+    _seed_noise_events(settings, "2026-08-25", [_noise_event(1, now - 600)])
+    _write_noise_health(
+        settings,
+        {"last_run_unix": now - 5 * 3600, "token": {"ok": True, "checked_at_iso": "", "error": None}},
+    )
+    payload = status.build_status(settings, now=now, with_pairs=False)
+
+    assert "collecteur_bruit_vivant" in payload["failed_checks"]
+    # Les données, elles, sont fraîches : les deux signaux sont bien distincts.
+    assert "bruit_recent" not in payload["failed_checks"]
+
+
+def test_live_noise_collector_passes(settings):
+    now = NOON_UTC + 3600
+    _healthy_poller(settings, now)
+    _seed_noise_events(settings, "2026-08-25", [_noise_event(1, now - 600)])
+    _write_noise_health(
+        settings,
+        {"last_run_unix": now - 600, "token": {"ok": True, "checked_at_iso": "", "error": None}},
+    )
+    payload = status.build_status(settings, now=now, with_pairs=False)
+    assert payload["verdict"] == "OK"

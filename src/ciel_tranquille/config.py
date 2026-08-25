@@ -242,7 +242,14 @@ class Settings(BaseSettings):
     max_active_stations: int = Field(default=10, alias="CIEL_MAX_ACTIVE_STATIONS")
 
     # --- Santé de la source bruit (contrôle distinct du poller avion) ---
+    # Silence toléré côté DONNÉES. Attention : ce seuil ne peut pas être plus
+    # serré que la cadence du collecteur augmentée de la latence de publication,
+    # sinon il bascule en échec avant chaque passage (cf. `noise_silence_budget_s`).
     noise_max_silence_s: int = Field(default=7200, alias="CIEL_NOISE_MAX_SILENCE_S")
+    # Cadence du service de collecte de bruit, telle que passée à `--every`.
+    noise_interval_s: int = Field(default=10800, alias="CIEL_NOISE_INTERVAL_S")
+    # Latence de publication observée côté Bruitparif (~1 h).
+    noise_publication_lag_s: int = Field(default=3600, alias="CIEL_NOISE_PUBLICATION_LAG_S")
     noise_day_start_utc: int = Field(default=5, alias="CIEL_NOISE_DAY_START_UTC")
     noise_day_end_utc: int = Field(default=21, alias="CIEL_NOISE_DAY_END_UTC")
 
@@ -256,6 +263,15 @@ class Settings(BaseSettings):
 
     # --- Verdict de supervision : âge max du dernier snapshot avant KO ---
     status_max_snapshot_age_s: int = Field(default=300, alias="CIEL_STATUS_MAX_SNAPSHOT_AGE_S")
+
+    # --- Notifications mobiles (ntfy) ---
+    # Le sujet vaut mot de passe : qui le connaît lit les notifications. Vide =
+    # notifications désactivées. `repr=False` pour qu'il ne fuite pas dans une trace.
+    ntfy_topic: str = Field(default="", alias="CIEL_NTFY_TOPIC", repr=False)
+    ntfy_url: str = Field(default="https://ntfy.sh", alias="CIEL_NTFY_URL")
+    # Heure UTC du point quotidien. Son absence est le seul indice disponible
+    # quand la supervision elle-même est morte.
+    ntfy_digest_hour_utc: int = Field(default=7, alias="CIEL_NTFY_DIGEST_HOUR_UTC")
 
     # --- Mode d'ingestion : "live" (API réelle) | "replay" (snapshots) ---
     ingest_mode: str = Field(default="replay", alias="CT_INGEST_MODE")
@@ -362,6 +378,39 @@ class Settings(BaseSettings):
     def events_saturation_threshold(self) -> int:
         """Nombre d'événements à partir duquel une fenêtre est jugée tronquée."""
         return max(1, int(self.events_page_cap * self.events_saturation_ratio))
+
+    @property
+    def ntfy_enabled(self) -> bool:
+        return bool(self.ntfy_topic)
+
+    @property
+    def notify_state_path(self) -> Path:
+        """Dernier verdict notifié : sans lui, on renotifierait à chaque cycle."""
+        return self.status_dir / "notify_state.json"
+
+    @property
+    def noise_silence_budget_s(self) -> int:
+        """Silence réellement tolérable pour la source bruit.
+
+        L'âge du dernier événement sur disque ne peut pas descendre en dessous de
+        la latence de publication, et remonte jusqu'à cette latence plus la
+        cadence du collecteur juste avant chaque passage. Un seuil plus serré
+        produirait une alerte à chaque cycle — le meilleur moyen de rendre une
+        notification inutile. On prend donc le plus grand des deux, avec une
+        marge d'un quart de cycle.
+        """
+        plancher = self.noise_interval_s + self.noise_publication_lag_s
+        return max(self.noise_max_silence_s, int(plancher * 1.25))
+
+    @property
+    def noise_run_max_age_s(self) -> int:
+        """Âge max du dernier passage du collecteur avant de le déclarer mort.
+
+        Signal **direct** et indépendant de la latence de publication : si le
+        service ne tourne plus, on le sait en un cycle et demi, sans attendre que
+        les données vieillissent.
+        """
+        return int(self.noise_interval_s * 1.5)
 
     @property
     def noise_health_path(self) -> Path:

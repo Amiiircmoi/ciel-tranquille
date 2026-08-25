@@ -186,6 +186,43 @@ et `CIEL_STATUS_INTERVAL_S`.
 N'activez qu'**une** des deux méthodes : cumuler cron et ordonnanceurs ferait
 tourner deux compactions concurrentes sur les mêmes fichiers.
 
+## 10. Notifications mobiles (facultatif mais recommandé)
+
+Sans alerte, une collecte de six jours se vérifie en se connectant — donc en
+pratique pas assez souvent. Le service de supervision publie sur
+[ntfy](https://ntfy.sh) à chaque **changement** d'état.
+
+```bash
+openssl rand -hex 16        # sujet privé : le sujet vaut mot de passe
+```
+
+Reportez-le dans `.env` (`CIEL_NTFY_TOPIC`), abonnez-vous au même sujet depuis
+l'application ntfy, puis recréez le service de supervision :
+
+```bash
+docker compose -f compose.prod.yaml up -d --force-recreate status-scheduler
+```
+
+Un message « supervision active » arrive au premier cycle : il vaut test de
+bout en bout. Ensuite, quatre événements seulement.
+
+| Événement | Quand | Priorité |
+|---|---|---|
+| `demarrage` | premier cycle | normale |
+| `panne` | le verdict passe OK → KO | urgente |
+| `retabli` | le verdict repasse KO → OK | haute |
+| `resume` | une fois par jour à `CIEL_NTFY_DIGEST_HOUR_UTC` | discrète |
+
+**Ce que ce dispositif ne peut pas faire.** Aucune notification push ne prouve
+qu'un système est vivant : si la machine, le conteneur ou le réseau tombent, il
+ne part rien — et le silence ressemble à du calme. Le point quotidien est la
+seule parade : **son absence est le signal**. Notez l'heure à laquelle vous
+l'attendez, et inquiétez-vous s'il ne vient pas.
+
+Pour une garantie plus forte, il faudrait un tiers qui surveille l'absence de
+signal (ntfy en offre une côté serveur payant, ou tout service de *dead man's
+switch*). Ce n'est pas branché ici.
+
 ---
 
 ## Diagnostic
@@ -210,7 +247,8 @@ tourner deux compactions concurrentes sur les mêmes fichiers.
 | `snapshot_recent` / `debit_horaire` | poller arrêté, OpenSky injoignable | `logs poller` ; le service redémarre seul (`unless-stopped`) |
 | `budget_credits` | budget quotidien épuisé | attendre minuit UTC — la collecte reprend seule ; vérifier `CT_POLL_INTERVAL_S` |
 | `token_bruitparif` | motif de scraping cassé (front redéployé) | ajuster `_TOKEN_RE` dans `bruitparif_client.py` |
-| `bruit_recent` | source bruit muette depuis > 2 h en journée | `logs noise` puis `stations validate` |
+| `bruit_recent` | source bruit muette au-delà du budget (cadence + latence) | `logs noise` puis `stations validate` |
+| `collecteur_bruit_vivant` | le service `noise` ne tourne plus | `docker compose ... ps` puis `logs noise` |
 | `config_stations` | `stations.json` absent ou sans `active` | relancer le sondage (§6) |
 
 ### Arrêt et reprise

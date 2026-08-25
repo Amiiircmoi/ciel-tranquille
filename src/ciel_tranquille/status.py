@@ -45,6 +45,7 @@ from ciel_tranquille.compact import SECONDS_PER_HOUR, SNAPSHOT_RE, hour_key
 from ciel_tranquille.config import Settings, StationConfigError, get_settings
 from ciel_tranquille.monitoring.heartbeat import read_heartbeat, write_json_atomic
 from ciel_tranquille.monitoring.logging_setup import configure_logging
+from ciel_tranquille.monitoring.notify import notify_from_status
 from ciel_tranquille.storage.duck import states_globs, states_roots
 from ciel_tranquille.transform.colocate import build_pairs
 
@@ -185,6 +186,7 @@ def noise_state(settings: Settings, now: float) -> dict:
     last_ts = _last_event_ts(settings, now)
     health = read_heartbeat(settings.noise_health_path) or {}
     token = health.get("token") or {}
+    last_run = health.get("last_run_unix")
     return {
         "day_utc": day,
         "events_today": int(len(events)),
@@ -196,6 +198,10 @@ def noise_state(settings: Settings, now: float) -> dict:
         "last_event_age_s": None if last_ts is None else round(max(0.0, now - last_ts), 1),
         "daytime": is_daytime(settings, now),
         "last_collect_run_iso": health.get("last_run_iso"),
+        "last_collect_run_age_s": (
+            None if not last_run else round(max(0.0, now - float(last_run)), 1)
+        ),
+        "silence_budget_s": settings.noise_silence_budget_s,
         "window_resplits_last_run": health.get("window_resplits"),
         "rate_limited_last_run": health.get("rate_limited"),
         "token": {
@@ -400,8 +406,21 @@ def _checks(settings: Settings, collecte: dict, credits: dict, bruit: dict) -> l
             "ok": _noise_is_fresh(settings, bruit),
             "detail": (
                 f"dernier événement de bruit il y a {bruit['last_event_age_s']} s "
-                f"(seuil {settings.noise_max_silence_s} s en journée ; "
-                f"journée={bruit['daytime']})"
+                f"(budget {settings.noise_silence_budget_s} s = cadence du collecteur "
+                f"+ latence de publication ; journée={bruit['daytime']})"
+            ),
+        },
+        # Signal DIRECT : le collecteur tourne-t-il encore ? Indépendant de la
+        # latence de publication, donc bien plus rapide à lever le doute.
+        {
+            "name": "collecteur_bruit_vivant",
+            "ok": (
+                bruit["last_collect_run_age_s"] is not None
+                and bruit["last_collect_run_age_s"] <= settings.noise_run_max_age_s
+            ),
+            "detail": (
+                f"dernier passage du collecteur il y a {bruit['last_collect_run_age_s']} s "
+                f"(seuil {settings.noise_run_max_age_s} s)"
             ),
         },
         {
@@ -425,7 +444,7 @@ def _noise_is_fresh(settings: Settings, bruit: dict) -> bool:
     age = bruit["last_event_age_s"]
     if age is None:
         return False
-    return age <= settings.noise_max_silence_s
+    return age <= settings.noise_silence_budget_s
 
 
 def build_status(
@@ -474,11 +493,22 @@ def write_status(
     now: float | None = None,
     with_pairs: bool = True,
     recount_pairs: bool = False,
+    notify: bool = True,
 ) -> dict:
-    """Construit puis écrit `status/status.json` (atomique). Retourne le document."""
+    """Construit puis écrit `status/status.json` (atomique). Retourne le document.
+
+    Publie ensuite une notification **si et seulement si** l'état a changé
+    (cf. `monitoring.notify`). L'écriture du rapport prime : un échec de
+    notification ne doit jamais empêcher le fichier d'être à jour.
+    """
     settings = settings or get_settings()
     payload = build_status(settings, now, with_pairs=with_pairs, recount_pairs=recount_pairs)
     write_json_atomic(settings.status_path, payload)
+    if notify:
+        try:
+            notify_from_status(settings, payload, now)
+        except Exception:  # noqa: BLE001 — la supervision passe avant l'alerte
+            logger.exception("Notification impossible — rapport tout de même écrit.")
     return payload
 
 
@@ -488,6 +518,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-pairs", action="store_true", help="Ne pas compter les paires.")
     parser.add_argument("--recount", action="store_true", help="Recompter toutes les heures.")
     parser.add_argument("--print", action="store_true", help="Afficher le JSON produit.")
+    parser.add_argument(
+        "--no-notify", action="store_true", help="Ne pas publier de notification ntfy."
+    )
     parser.add_argument(
         "--every",
         type=float,
@@ -499,7 +532,11 @@ def main(argv: list[str] | None = None) -> int:
 
     while True:
         try:
-            payload = write_status(with_pairs=not args.no_pairs, recount_pairs=args.recount)
+            payload = write_status(
+                with_pairs=not args.no_pairs,
+                recount_pairs=args.recount,
+                notify=not args.no_notify,
+            )
             resume = (
                 f"{payload['verdict']} — dernier snapshot "
                 f"{payload['collecte']['last_snapshot_age_s']} s, "
