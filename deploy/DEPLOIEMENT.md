@@ -222,7 +222,19 @@ docker compose -f compose.prod.yaml up -d poller noise
 
 Le poller intercepte SIGTERM et termine son tick en cours. Les écritures Parquet
 passent par un temporaire suivi d'un `os.replace` : un arrêt brutal ne laisse
-jamais de fichier tronqué dans la landing.
+jamais de fichier tronqué dans la landing (vérifié en tuant le processus en
+cours de collecte).
+
+**Reprise après plantage.** Si le processus meurt, le moteur de conteneurs le
+relance (`restart: unless-stopped`) et la collecte repart sans intervention.
+Attention en revanche : `docker kill` est interprété par Docker comme un arrêt
+**opérateur**, donc sans relance automatique — c'est `docker compose up -d` qui
+remet alors le service en marche. Pour éprouver la reprise, tuez le processus
+depuis l'intérieur :
+
+```bash
+docker exec ciel-poller python -c "import os,signal; os.kill(1, signal.SIGKILL)"
+```
 
 ### En fin de collecte
 
