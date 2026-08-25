@@ -1,0 +1,169 @@
+{
+  "_comment": [
+    "Stations du réseau Bruitparif Survol interrogées par le collecteur de bruit.",
+    "",
+    "Ce fichier n'est PAS écrit à la main : il est produit par le sondage, qui",
+    "prend ses candidats dans /sites (seul endpoint exposant identifiants ET",
+    "coordonnées — /events n'en renvoie aucune) et laisse le rendement observé",
+    "décider. Aucun identifiant n'est inventé.",
+    "",
+    "Le champ 'active' est EXPLICITE et sans valeur par défaut : c'est lui, et",
+    "lui seul, qui décide de ce qui est collecté. Le poller refuse de démarrer",
+    "si une station active est hors bbox ou muette.",
+    "",
+    "Le réseau évolue (ouvertures, pannes, fermetures). Re-sondez au déploiement :",
+    "  python -m ciel_tranquille.ingest.stations probe --write",
+    "La sortie va dans $CIEL_DATA_DIR/stations.json, qui prime sur ce fichier.",
+    "",
+    "'saturated': l'API plafonne à ~50 réponses par appel. Un compte au plafond",
+    "est un PLANCHER, pas une mesure : la station produit AU MOINS ce nombre.",
+    "",
+    "Ajouter des stations ne coûte AUCUN crédit OpenSky supplémentaire : la bbox",
+    "est commune et le filtrage par station se fait en post-traitement."
+  ],
+  "source": "sondage /events sur 6 h (candidats issus de /sites)",
+  "generated_at_iso": "2026-08-25T11:51:27Z",
+  "probe_window_hours": 6,
+  "bbox": {
+    "lat_min": 48.1,
+    "lon_min": 1.3,
+    "lat_max": 49.5,
+    "lon_max": 4.0,
+    "area_deg2": 3.78
+  },
+  "active": [
+    "95500-GONESSE-MEDIATHEQUE-M",
+    "95390-ST-PRIX-MAIRIE-M",
+    "77230-MARCHEMORET-MAIRIE-M",
+    "77410-SAINT-MESMES-GRANDERUE-M",
+    "91260-JUVISY-SARRAUT",
+    "93420-VILLEPINTE-LAURENCIN-M",
+    "95140-GARGES-CLOSTERMANN",
+    "95350-ST-BRICE-EDITH-PIAF-M",
+    "95500-BONNEUIL-PISTE",
+    "91320-WISSOUS-BOUSSARD"
+  ],
+  "stations": [
+    {
+      "measurement_id": "95500-GONESSE-MEDIATHEQUE-M",
+      "latitude": 48.985,
+      "longitude": 2.447118,
+      "airport": "CDG",
+      "label": "95500-GONESSE-MEDIATHEQUE-M",
+      "events_6h": 50,
+      "usable_events_6h": 50,
+      "saturated": true,
+      "error": null
+    },
+    {
+      "measurement_id": "95390-ST-PRIX-MAIRIE-M",
+      "latitude": 49.006393,
+      "longitude": 2.2632658,
+      "airport": "CDG",
+      "label": "95390-ST-PRIX-MAIRIE-M",
+      "events_6h": 50,
+      "usable_events_6h": 50,
+      "saturated": true,
+      "error": null
+    },
+    {
+      "measurement_id": "77230-MARCHEMORET-MAIRIE-M",
+      "latitude": 49.04981,
+      "longitude": 2.7714772,
+      "airport": "CDG",
+      "label": "77230-MARCHEMORET-MAIRIE-M",
+      "events_6h": 50,
+      "usable_events_6h": 50,
+      "saturated": true,
+      "error": null
+    },
+    {
+      "measurement_id": "77410-SAINT-MESMES-GRANDERUE-M",
+      "latitude": 48.985096,
+      "longitude": 2.6960533,
+      "airport": "CDG",
+      "label": "77410-SAINT-MESMES-GRANDERUE-M",
+      "events_6h": 50,
+      "usable_events_6h": 50,
+      "saturated": true,
+      "error": null
+    },
+    {
+      "measurement_id": "91260-JUVISY-SARRAUT",
+      "latitude": 48.694645,
+      "longitude": 2.3620508,
+      "airport": "ORY",
+      "label": "91260-JUVISY-SARRAUT",
+      "events_6h": 50,
+      "usable_events_6h": 50,
+      "saturated": true,
+      "error": null
+    },
+    {
+      "measurement_id": "93420-VILLEPINTE-LAURENCIN-M",
+      "latitude": 48.96613,
+      "longitude": 2.546272,
+      "airport": "CDG",
+      "label": "93420-VILLEPINTE-LAURENCIN-M",
+      "events_6h": 50,
+      "usable_events_6h": 50,
+      "saturated": true,
+      "error": null
+    },
+    {
+      "measurement_id": "95140-GARGES-CLOSTERMANN",
+      "latitude": 48.97167,
+      "longitude": 2.4065,
+      "airport": "LBG",
+      "label": "95140-GARGES-CLOSTERMANN",
+      "events_6h": 50,
+      "usable_events_6h": 50,
+      "saturated": true,
+      "error": null
+    },
+    {
+      "measurement_id": "95350-ST-BRICE-EDITH-PIAF-M",
+      "latitude": 48.999672,
+      "longitude": 2.3644264,
+      "airport": "LBG",
+      "label": "95350-ST-BRICE-EDITH-PIAF-M",
+      "events_6h": 50,
+      "usable_events_6h": 50,
+      "saturated": true,
+      "error": null
+    },
+    {
+      "measurement_id": "95500-BONNEUIL-PISTE",
+      "latitude": 48.9742,
+      "longitude": 2.4343457,
+      "airport": "LBG",
+      "label": "95500-BONNEUIL-PISTE",
+      "events_6h": 50,
+      "usable_events_6h": 50,
+      "saturated": true,
+      "error": null
+    },
+    {
+      "measurement_id": "91320-WISSOUS-BOUSSARD",
+      "latitude": 48.730473,
+      "longitude": 2.3243234,
+      "airport": "ORY",
+      "label": "91320-WISSOUS-BOUSSARD",
+      "events_6h": 15,
+      "usable_events_6h": 15,
+      "saturated": false,
+      "error": null
+    },
+    {
+      "measurement_id": "94290-VILLENEUVE-LE-ROI-NOBLECOURT",
+      "latitude": 48.730312,
+      "longitude": 2.4279673,
+      "airport": "ORY",
+      "label": "94290-VILLENEUVE-LE-ROI-NOBLECOURT",
+      "events_6h": 0,
+      "usable_events_6h": 0,
+      "saturated": false,
+      "error": null
+    }
+  ]
+}

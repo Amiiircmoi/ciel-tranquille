@@ -1,0 +1,151 @@
+# Stack de COLLECTE en production — six jours en autonomie, sans supervision.
+#
+# Rien d'identifiant ici : chemins, contacts et secrets viennent tous du fichier
+# d'environnement (voir `.env.example` et `deploy/DEPLOIEMENT.md`). Ce fichier
+# est donc versionnable tel quel dans un dépôt public.
+#
+#   docker compose -f compose.prod.yaml up -d poller noise
+#   docker compose -f compose.prod.yaml run --rm compact
+#   docker compose -f compose.prod.yaml run --rm status
+#
+# Contraintes d'hébergement respectées ici :
+#   - aucun `ports:` — le trafic est exclusivement sortant ;
+#   - réseau bridge DÉDIÉ, non partagé avec la production tierce ;
+#   - plafonds CPU / mémoire / PID sur chaque service, pour ne jamais concurrencer
+#     l'application de production qui partage la machine ;
+#   - un seul point d'écriture : le volume monté sur /data.
+
+name: ciel-tranquille-collect
+
+x-collector: &collector
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile.poller
+  image: ciel-tranquille-collect:latest
+  env_file:
+    - .env
+  # L'uid doit correspondre au propriétaire de ${CIEL_HOST_DATA_DIR} sur l'hôte.
+  user: "${CIEL_UID:-10001}:${CIEL_GID:-10001}"
+  volumes:
+    - "${CIEL_HOST_DATA_DIR:-./data}:/data"
+  networks:
+    - collect
+  # Le système de fichiers de l'image est en lecture seule : le conteneur ne peut
+  # écrire que dans /data (le volume) et /tmp (tmpfs, non persistant).
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  # Part faible du CPU : en cas de contention, la production tierce passe devant.
+  cpu_shares: 256
+  pids_limit: ${CIEL_PIDS_LIMIT:-128}
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  # --- Trafic aérien : poller OpenSky forward, cadence 30 s ------------------
+  poller:
+    <<: *collector
+    container_name: ciel-poller
+    command: ["python", "-m", "ciel_tranquille.ingest.poller", "--forward"]
+    restart: unless-stopped
+    stop_grace_period: 45s
+    deploy:
+      resources:
+        limits:
+          cpus: "${CIEL_POLLER_CPUS:-0.50}"
+          memory: "${CIEL_POLLER_MEMORY:-512M}"
+          pids: ${CIEL_PIDS_LIMIT:-128}
+    healthcheck:
+      # Le heartbeat est réécrit à chaque snapshot réussi : s'il vieillit de plus
+      # de 5 minutes à une cadence de 30 s, la collecte est en panne.
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import json,time,sys;
+          b=json.load(open('/data/status/heartbeat.json'));
+          sys.exit(0 if time.time()-b['updated_at_unix'] < 300 else 1)"
+      interval: 120s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+
+  # --- Bruit : collecteur Bruitparif, repasse toutes les 3 h -----------------
+  # Fréquence choisie pour la latence de publication (~1 h) : le comptage de
+  # paires ne fige une heure qu'une fois son bruit certainement collecté.
+  noise:
+    <<: *collector
+    container_name: ciel-noise
+    command:
+      - python
+      - -m
+      - ciel_tranquille.ingest.noise_collector
+      - --days
+      - "${CIEL_NOISE_DAYS:-2}"
+      - --every
+      - "${CIEL_NOISE_INTERVAL_S:-10800}"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "${CIEL_NOISE_CPUS:-0.50}"
+          memory: "${CIEL_NOISE_MEMORY:-512M}"
+          pids: ${CIEL_PIDS_LIMIT:-128}
+
+  # --- Compaction horaire (cron) --------------------------------------------
+  # Sans elle, six jours de collecte laissent plus de 17 000 petits Parquet.
+  compact:
+    <<: *collector
+    command: ["python", "-m", "ciel_tranquille.compact"]
+    restart: "no"
+    profiles: ["tools"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${CIEL_COMPACT_CPUS:-1.00}"
+          memory: "${CIEL_COMPACT_MEMORY:-1G}"
+          pids: ${CIEL_PIDS_LIMIT:-128}
+
+  # --- Rapport de supervision (cron) ----------------------------------------
+  status:
+    <<: *collector
+    command: ["python", "-m", "ciel_tranquille.status"]
+    restart: "no"
+    profiles: ["tools"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${CIEL_STATUS_CPUS:-1.00}"
+          memory: "${CIEL_STATUS_MEMORY:-1G}"
+          pids: ${CIEL_PIDS_LIMIT:-128}
+
+  # --- Sondage des stations (ponctuel, au déploiement) ----------------------
+  stations:
+    <<: *collector
+    command: ["python", "-m", "ciel_tranquille.ingest.stations", "probe", "--write"]
+    restart: "no"
+    profiles: ["tools"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${CIEL_STATUS_CPUS:-1.00}"
+          memory: "${CIEL_STATUS_MEMORY:-1G}"
+          pids: ${CIEL_PIDS_LIMIT:-128}
+
+networks:
+  collect:
+    driver: bridge
+    # Réseau dédié à la collecte : aucun autre projet ne s'y attache, et aucun
+    # port n'est publié — rien de ce qui tourne ici n'est joignable de l'extérieur.
+    #
+    # Volontairement PAS `internal: true` : un réseau interne coupe tout accès
+    # sortant, or la collecte vit d'appels sortants vers OpenSky et Bruitparif.
+    # L'isolement recherché est vis-à-vis des autres conteneurs de la machine,
+    # pas vis-à-vis d'Internet ; c'est ce que fait un bridge dédié sans ports.

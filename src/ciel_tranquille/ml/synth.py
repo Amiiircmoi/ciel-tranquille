@@ -153,7 +153,7 @@ def generate(
                     pool.append({**rec, "is_heavy": is_heavy, "airport": airport})
 
             if records:
-                write_batch(records, settings.raw_dir)
+                write_batch(records, settings.raw_dir / "states")
                 n_states_total += len(records)
 
             # Calcul du bruit à chaque station depuis les aéronefs proches.

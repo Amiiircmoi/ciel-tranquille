@@ -26,14 +26,16 @@ def test_replay_advances_positions(settings):
 
 
 def test_poller_replay_writes_parquet_and_metrics(settings):
+    # La landing zone du poller est `$CIEL_DATA_DIR/landing/date=…` (contrat
+    # d'hébergement) ; `raw/states/` reste lu pour l'historique déjà collecté.
     metrics = poller.run(3, settings=settings, sleep_between=False)
     assert len(metrics) == 3
     assert all(m.ok for m in metrics)
-    files = list((settings.raw_dir / "states").rglob("*.parquet"))
+    files = list(settings.landing_dir.rglob("*.parquet"))
     assert len(files) == 3
     # idempotence : relancer ne crée pas de doublons de fichiers
     poller.run(3, settings=settings, sleep_between=False)
-    assert len(list((settings.raw_dir / "states").rglob("*.parquet"))) == 3
+    assert len(list(settings.landing_dir.rglob("*.parquet"))) == 3
 
 
 def test_states_to_records_parses_opensky_format():

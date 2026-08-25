@@ -19,9 +19,13 @@ __pycache__/
 .mypy_cache/
 .ipynb_checkpoints/
 
-# --- Données générées (landing / curated) — régénérables ---
+# --- Données générées (landing / curated / supervision) — régénérables ---
 data/raw/
+data/landing/
 data/curated/
+data/status/
+# Liste de stations produite par le sondage (config/stations.json est versionné)
+data/stations.json
 # Sorties annexes (captures, exports d'analyse) — défaut de CT_OUTPUT_DIR
 outputs/
 *.duckdb

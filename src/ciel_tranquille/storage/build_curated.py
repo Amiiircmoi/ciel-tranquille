@@ -21,7 +21,7 @@ import duckdb
 import pandas as pd
 
 from ciel_tranquille.config import Settings, get_settings
-from ciel_tranquille.storage.duck import connect, has_raw_data, raw_states_glob, sample_csv
+from ciel_tranquille.storage.duck import connect, sample_csv, states_globs
 from ciel_tranquille.transform.clean import (
     clean_flights,
     clean_noise,
@@ -51,12 +51,15 @@ ORDER BY niveau_agregation, airport, periode, type_jour
 
 
 def _load_states(con: duckdb.DuckDBPyConnection, settings: Settings) -> pd.DataFrame:
-    if not has_raw_data(settings):
+    globs = states_globs(settings)
+    if not globs:
         logger.warning("Aucun Parquet en landing zone : table states vide.")
         return pd.DataFrame()
-    glob = raw_states_glob(settings)
+    # `union_by_name` : la landing brute et les fichiers compactés partagent le
+    # même schéma métier mais pas forcément le même ordre de colonnes.
+    patterns = ", ".join(f"'{g}'" for g in globs)
     return con.execute(
-        f"SELECT * FROM read_parquet('{glob}', hive_partitioning=true)"
+        f"SELECT * FROM read_parquet([{patterns}], hive_partitioning=true, union_by_name=true)"
     ).fetch_df()
 
 

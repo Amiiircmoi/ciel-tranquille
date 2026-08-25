@@ -28,10 +28,35 @@ def connect(settings: Settings | None = None, read_only: bool = False):
         con.close()
 
 
-def raw_states_glob(settings: Settings | None = None) -> str:
-    """Motif glob des Parquet de la landing zone (partition Hive par date)."""
+def states_roots(settings: Settings | None = None) -> list[Path]:
+    """Racines contenant des partitions d'états, de la plus fraîche à la plus ancienne.
+
+    Trois emplacements coexistent volontairement :
+    - `landing/` : ce que le poller écrit aujourd'hui ;
+    - `curated/states_hourly/` : les mêmes snapshots après compaction horaire ;
+    - `raw/states/` : les collectes antérieures au découpage `landing/`.
+
+    Les lire toutes évite qu'une compaction ou un changement de disposition ne
+    rende invisible une partie de l'historique déjà collecté.
+    """
     settings = settings or get_settings()
-    return str(settings.raw_dir / "states" / "**" / "*.parquet")
+    return [settings.landing_dir, settings.compacted_states_dir, settings.raw_dir / "states"]
+
+
+def states_globs(settings: Settings | None = None) -> list[str]:
+    """Motifs glob des racines qui contiennent effectivement des Parquet."""
+    return [
+        str(root / "**" / "*.parquet")
+        for root in states_roots(settings)
+        if root.exists() and any(root.rglob("*.parquet"))
+    ]
+
+
+def raw_states_glob(settings: Settings | None = None) -> str:
+    """Motif glob principal (landing courante) — compatibilité ascendante."""
+    settings = settings or get_settings()
+    globs = states_globs(settings)
+    return globs[0] if globs else str(settings.landing_dir / "**" / "*.parquet")
 
 
 def table_count(con: duckdb.DuckDBPyConnection, table: str) -> int:
@@ -44,9 +69,7 @@ def list_tables(settings: Settings | None = None) -> list[str]:
 
 
 def has_raw_data(settings: Settings | None = None) -> bool:
-    settings = settings or get_settings()
-    states_dir = settings.raw_dir / "states"
-    return states_dir.exists() and any(states_dir.rglob("*.parquet"))
+    return bool(states_globs(settings))
 
 
 def sample_csv(name: str, settings: Settings | None = None) -> Path:

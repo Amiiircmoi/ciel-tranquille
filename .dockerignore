@@ -12,3 +12,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.pdf
+data/landing/
+data/status/
+data/real_survol/
+dossier-rncp/
+.env
+.env.*
+!.env.example

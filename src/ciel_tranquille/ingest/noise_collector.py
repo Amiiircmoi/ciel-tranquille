@@ -26,8 +26,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ciel_tranquille.config import STATIONS, Settings, Station, get_settings
-from ciel_tranquille.ingest.bruitparif_client import BruitparifClient
+from ciel_tranquille.config import Settings, Station, StationConfigError, get_settings
+from ciel_tranquille.ingest.bruitparif_client import BruitparifClient, BruitparifRateLimited
+from ciel_tranquille.monitoring.heartbeat import write_json_atomic
 from ciel_tranquille.storage.duck import connect
 
 logger = logging.getLogger(__name__)
@@ -154,26 +155,125 @@ class StationDayResult:
     error: str | None = None
 
 
+def _fetch_window_with_backoff(
+    client: BruitparifClient,
+    station: str,
+    start: datetime,
+    end: datetime,
+    max_retries: int,
+    backoff_base_s: float,
+    sleep=time.sleep,
+) -> list[dict]:
+    """Récupère une fenêtre, avec back-off exponentiel entre tentatives.
+
+    Le client porte déjà un retry réseau (tenacity). Cette couche traite le cas
+    au-dessus : une fenêtre qui échoue malgré les retries (coupure prolongée,
+    503 en rafale). On patiente **de plus en plus longtemps** (5 s, 10 s, 20 s…)
+    plutôt que de repartir aussitôt : sur une IP partagée avec une production
+    tierce, insister vite est le meilleur moyen de se faire bloquer. Un 429
+    remonte immédiatement, sans nouvelle tentative.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max(1, max_retries)):
+        try:
+            return client.fetch_window_air_events(station, start, end)
+        except BruitparifRateLimited:
+            raise
+        except Exception as exc:  # noqa: BLE001 — on retente puis on abandonne la fenêtre
+            last_exc = exc
+            if attempt + 1 >= max(1, max_retries):
+                break
+            wait_s = backoff_base_s * (2**attempt)
+            logger.warning(
+                "Fenêtre %s %s..%s en échec (tentative %d/%d) — back-off %.0fs : %s",
+                station, start, end, attempt + 1, max_retries, wait_s, exc,
+            )
+            sleep(wait_s)
+    raise last_exc if last_exc else RuntimeError("Échec de fenêtre sans exception.")
+
+
+def _collect_window(
+    client: BruitparifClient,
+    station: str,
+    start: datetime,
+    end: datetime,
+    settings: Settings,
+    pause_s: float,
+    stats: dict,
+    sleep=time.sleep,
+) -> list[dict]:
+    """Collecte une fenêtre, en la **redécoupant** si la réponse est saturée.
+
+    `/events` plafonne à ~50 réponses **biaisées vers le début de l'intervalle** :
+    une fenêtre saturée ne rend donc pas « 50 événements sur 60 minutes » mais
+    « les 50 premiers », et la fin de la fenêtre est perdue **en silence**. Dès
+    que le compte approche du plafond (`CIEL_EVENTS_PAGE_CAP × ratio`), on coupe
+    la fenêtre en deux et on rappelle chaque moitié, jusqu'à
+    `CIEL_EVENTS_MIN_WINDOW_MIN`. Chaque redécoupage est compté dans les métriques :
+    une hausse durable signale qu'il faut réduire la fenêtre nominale.
+    """
+    events = _fetch_window_with_backoff(
+        client, station, start, end,
+        settings.bruitparif_max_retries, settings.bruitparif_backoff_base_s, sleep,
+    )
+    stats["calls"] = stats.get("calls", 0) + 1
+
+    span_minutes = (end - start).total_seconds() / 60.0
+    if (
+        len(events) < settings.events_saturation_threshold
+        or span_minutes <= settings.events_min_window_minutes
+    ):
+        return events
+
+    midpoint = start + (end - start) / 2
+    stats["resplits"] = stats.get("resplits", 0) + 1
+    logger.info(
+        "Fenêtre saturée %s %s..%s (%d événements >= seuil %d) — redécoupage en 2 × %.0f min.",
+        station, start, end, len(events), settings.events_saturation_threshold, span_minutes / 2,
+    )
+    merged: list[dict] = []
+    for sub_start, sub_end in ((start, midpoint), (midpoint, end)):
+        if pause_s:
+            sleep(pause_s)
+        merged.extend(
+            _collect_window(client, station, sub_start, sub_end, settings, pause_s, stats, sleep)
+        )
+    return merged
+
+
 def collect(
     settings: Settings | None = None,
     days_back: int = 14,
     end_day: date | None = None,
-    stations: tuple[Station, ...] = STATIONS,
+    stations: tuple[Station, ...] | None = None,
     client: BruitparifClient | None = None,
     collected_at: datetime | None = None,
-    request_pause_s: float = 0.5,
+    request_pause_s: float | None = None,
     window_minutes: int = 60,
 ) -> dict:
     """Collecte les survols des `stations` sur les `days_back` derniers jours.
+
+    `stations` par défaut = la liste externalisée (`CIEL_STATIONS_FILE` /
+    `$CIEL_DATA_DIR/stations.json` / `config/stations.json`), pas une constante :
+    on augmente le rendement en ajoutant des stations **sans toucher au code** —
+    et sans consommer un seul crédit OpenSky de plus, la bbox étant commune.
 
     `end_day` = dernier jour inclus (défaut : aujourd'hui UTC). Chaque jour est
     découpé en **fenêtres infra-journalières** (`window_minutes`, 60 par défaut)
     pour rester sous le plafond de ~50 événements/appel (anti-troncature). Écrit
     un Parquet par (station, jour) + JSON brut (provenance) et journalise une
-    métrique par (station, jour). `request_pause_s` espace les appels.
+    métrique par (station, jour).
+
+    `request_pause_s` (défaut `CIEL_BRUITPARIF_PAUSE_S`) espace **chaque** appel ;
+    une fenêtre en échec est retentée avec back-off exponentiel avant d'être
+    abandonnée. Avec 9 stations × 24 fenêtres × 2 jours, l'espacement est ce qui
+    sépare une collecte polie d'une rafale de 400 requêtes.
     """
     settings = settings or get_settings()
     settings.ensure_dirs()
+    stations = stations if stations is not None else settings.stations
+    if request_pause_s is None:
+        request_pause_s = settings.bruitparif_pause_s
     collected_at = collected_at or datetime.now(timezone.utc)
     end_day = end_day or collected_at.date()
     days = [end_day - timedelta(days=i) for i in range(days_back)][::-1]
@@ -182,10 +282,16 @@ def collect(
     client = client or BruitparifClient(settings)
     results: list[StationDayResult] = []
     raw_by_station: dict[str, list[dict]] = {st.measurement_id: [] for st in stations}
+    stats: dict[str, int] = {"calls": 0, "resplits": 0}
+    rate_limited = False
 
     try:
         for st in stations:
+            if rate_limited:
+                break
             for day in days:
+                if rate_limited:
+                    break
                 day_air: list[dict] = []
                 ok = True
                 error: str | None = None
@@ -193,8 +299,23 @@ def collect(
                     if request_pause_s:
                         time.sleep(request_pause_s)
                     try:
-                        air = client.fetch_window_air_events(st.measurement_id, start, end)
+                        air = _collect_window(
+                            client,
+                            st.measurement_id,
+                            start,
+                            end,
+                            settings,
+                            request_pause_s,
+                            stats,
+                        )
                         day_air.extend(air)
+                    except BruitparifRateLimited as exc:
+                        # Arrêt propre et immédiat : on garde ce qui est déjà collecté.
+                        ok = False
+                        error = str(exc)
+                        rate_limited = True
+                        logger.error("429 Bruitparif — arrêt de la collecte. %s", exc)
+                        break
                     except Exception as exc:  # noqa: BLE001 — fenêtre en échec : on continue
                         ok = False
                         error = str(exc)
@@ -239,8 +360,45 @@ def collect(
         "station_days": len(results),
         "air_events_total": sum(r.air_events for r in results),
         "written_total": sum(r.written for r in results),
+        "api_calls": stats["calls"],
+        "window_resplits": stats["resplits"],
+        "rate_limited": rate_limited,
     }
+    _write_noise_health(settings, client, report, collected_at)
     return report
+
+
+def _write_noise_health(
+    settings: Settings,
+    client: BruitparifClient,
+    report: dict,
+    collected_at: datetime,
+) -> None:
+    """Santé de la source bruit, lue par la supervision (`status.json`).
+
+    Contrôle **distinct** du poller avion : si le motif d'extraction du token
+    casse (redéploiement de la SPA Bruitparif), la collecte de bruit s'arrête
+    alors que le poller continue de tourner normalement. Sans ce fichier, la
+    panne resterait invisible jusqu'à l'analyse finale.
+    """
+    # `getattr` : un client injecté (doublure de test, client alternatif) n'est pas
+    # tenu d'exposer la santé du token — l'absence de mesure n'est pas un échec.
+    token_health = getattr(client, "token_health", None)
+    write_json_atomic(
+        settings.noise_health_path,
+        {
+            "last_run_unix": collected_at.timestamp(),
+            "last_run_iso": collected_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "token": token_health() if callable(token_health) else {"ok": None},
+            "stations": report["stations"],
+            "station_days_ok": report["station_days_ok"],
+            "station_days": report["station_days"],
+            "events_written": report["written_total"],
+            "api_calls": report["api_calls"],
+            "window_resplits": report["window_resplits"],
+            "rate_limited": report["rate_limited"],
+        },
+    )
 
 
 def _log_metrics(settings: Settings, results: list[StationDayResult], collected_at: datetime) -> None:
@@ -291,18 +449,66 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--days", type=int, default=14, help="Nombre de jours à remonter.")
     parser.add_argument("--end-day", type=str, default=None, help="Dernier jour inclus (YYYY-MM-DD).")
     parser.add_argument("--no-duckdb", action="store_true", help="Ne pas (re)charger DuckDB.")
+    parser.add_argument(
+        "--every",
+        type=float,
+        default=None,
+        help="Boucler indéfiniment en attendant N secondes entre deux collectes "
+        "(service de collecte continue ; sans cette option, un seul passage).",
+    )
     args = parser.parse_args(argv)
 
     end_day = date.fromisoformat(args.end_day) if args.end_day else None
-    report = collect(days_back=args.days, end_day=end_day)
-    print("Collecte bruit terminée :")
-    for k, v in report.items():
-        if k not in ("days", "stations"):
-            print(f"  {k}: {v}")
-    if not args.no_duckdb:
-        n = load_to_duckdb()
-        print(f"  noise_events (DuckDB): {n} lignes")
-    return 0
+    settings = get_settings()
+
+    # --- Contrôles de démarrage : échec bruyant plutôt que collecte muette ---
+    try:
+        stations = settings.stations
+    except StationConfigError as exc:
+        logger.error("Configuration de stations invalide — collecte refusée.\n%s", exc)
+        return 2
+    try:
+        # Le token est scrapé dans le HTML de la SPA : si le motif ne correspond
+        # plus (front redéployé), on s'arrête ici, fort et tout de suite, au lieu
+        # de collecter zéro événement pendant six jours.
+        probe_client = BruitparifClient(settings)
+        try:
+            probe_client.token()
+        finally:
+            health = probe_client.token_health()
+            write_json_atomic(
+                settings.noise_health_path,
+                {"last_run_unix": time.time(), "token": health, "startup_check": True},
+            )
+            probe_client.close()
+    except Exception as exc:  # noqa: BLE001 — démarrage impossible
+        logger.error(
+            "Token Bruitparif indisponible — collecte de bruit refusée au démarrage.\n%s", exc
+        )
+        return 3
+
+    logger.info(
+        "Collecte bruit : %d station(s), %d jour(s), pause %.1fs entre appels.",
+        len(stations), args.days, settings.polite_pause_s,
+    )
+    while True:
+        try:
+            report = collect(settings=settings, days_back=args.days, end_day=end_day)
+            print("Collecte bruit terminée :")
+            for k, v in report.items():
+                if k not in ("days", "stations"):
+                    print(f"  {k}: {v}")
+            if not args.no_duckdb:
+                n = load_to_duckdb(settings)
+                print(f"  noise_events (DuckDB): {n} lignes")
+        except Exception:  # noqa: BLE001 — un passage raté ne doit pas tuer le service
+            logger.exception("Passage de collecte bruit en échec.")
+            if args.every is None:
+                return 1
+        if args.every is None:
+            return 0
+        logger.info("Prochaine collecte bruit dans %.0f s.", args.every)
+        time.sleep(args.every)
 
 
 if __name__ == "__main__":

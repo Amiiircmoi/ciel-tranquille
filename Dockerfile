@@ -10,7 +10,7 @@ WORKDIR /app
 # Dépendances d'abord (cache des couches Docker).
 COPY pyproject.toml ./
 COPY src ./src
-RUN pip install --upgrade pip && pip install .
+RUN pip install --upgrade pip && pip install ".[ml,dashboard]"
 
 # Code applicatif + données échantillons + modèle packagé (dashboard autonome).
 COPY dashboard ./dashboard

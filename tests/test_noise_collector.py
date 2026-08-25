@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timezone
 
 import httpx
 
 from ciel_tranquille.config import STATIONS
 from ciel_tranquille.ingest import noise_collector as nc
-from ciel_tranquille.ingest.bruitparif_client import _TOKEN_RE
+from ciel_tranquille.ingest.bruitparif_client import _TOKEN_RE, BruitparifRateLimited
 from ciel_tranquille.ingest.opensky_client import OpenSkyClient
 
 
@@ -97,3 +98,112 @@ def test_retry_after_seconds_parses_and_bounds():
     assert OpenSkyClient._retry_after_seconds(httpx.Response(429, headers={"retry-after": "9999"})) == 120.0
     # absent -> défaut
     assert OpenSkyClient._retry_after_seconds(httpx.Response(429)) == 10.0
+
+
+# ------------------------------------------------- anti-troncature (redécoupage)
+class _SaturatingClient:
+    """Client factice saturé : renvoie `cap` événements tant que la fenêtre est
+    large, et redescend sous le seuil dès qu'elle est assez courte. Reproduit le
+    plafond ~50 de `/events`, biaisé vers le début de l'intervalle."""
+
+    def __init__(self, cap: int = 50, threshold_minutes: int = 45):
+        self.cap = cap
+        self.threshold_minutes = threshold_minutes
+        self.calls: list[tuple[str, datetime, datetime]] = []
+
+    def fetch_window_air_events(self, station, start, end):
+        self.calls.append((station, start, end))
+        span_min = (end - start).total_seconds() / 60.0
+        n = self.cap if span_min > self.threshold_minutes else 3
+        base = int(start.timestamp())
+        return [
+            {"category": "air", "id": base + i,
+             "max_ts": "2026-06-16T08:00:00Z", "start": "2026-06-16T08:00:00Z",
+             "end": "2026-06-16T08:01:00Z", "max_laeq": 75.0}
+            for i in range(n)
+        ]
+
+    def close(self):
+        pass
+
+
+def test_saturated_window_is_split_and_refetched(settings):
+    """Une fenêtre au plafond est recoupée : sinon la fin de fenêtre est perdue
+    en silence (l'API renvoie les 50 PREMIERS événements, pas 50 au hasard)."""
+    stub = _SaturatingClient()
+    report = nc.collect(
+        settings=settings, days_back=1, end_day=date(2026, 6, 16),
+        stations=(STATIONS[0],), client=stub, request_pause_s=0,
+        collected_at=datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc),
+    )
+    # 24 fenêtres horaires saturées -> chacune redécoupée en 2 × 30 min.
+    assert report["window_resplits"] == 24
+    assert report["api_calls"] == 24 * 3  # 1 appel saturé + 2 sous-fenêtres
+    assert len(stub.calls) == 72
+    spans = {round((e - s).total_seconds() / 60.0) for _, s, e in stub.calls}
+    assert spans == {60, 30}
+
+
+def test_unsaturated_windows_are_not_split(settings):
+    """Sans saturation, aucun appel supplémentaire : la politesse réseau prime."""
+    stub = _StubClient()
+    report = nc.collect(
+        settings=settings, days_back=1, end_day=date(2026, 6, 16),
+        stations=(STATIONS[0],), client=stub, request_pause_s=0,
+        collected_at=datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc),
+    )
+    assert report["window_resplits"] == 0
+    assert report["api_calls"] == 24
+
+
+def test_resplit_stops_at_the_minimum_window(settings):
+    """Le redécoupage s'arrête au plancher : pas de récursion infinie sur une
+    station réellement très dense."""
+    settings.events_min_window_minutes = 30
+    stub = _SaturatingClient(threshold_minutes=1)  # saturé quelle que soit la taille
+    nc.collect(
+        settings=settings, days_back=1, end_day=date(2026, 6, 16),
+        stations=(STATIONS[0],), client=stub, request_pause_s=0,
+        collected_at=datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc),
+    )
+    spans = {round((e - s).total_seconds() / 60.0) for _, s, e in stub.calls}
+    assert min(spans) == 30
+
+
+# --------------------------------------------------------- 429 : arrêt propre
+class _RateLimitedClient:
+    def __init__(self):
+        self.calls = 0
+
+    def fetch_window_air_events(self, station, start, end):
+        self.calls += 1
+        raise BruitparifRateLimited(120.0)
+
+    def close(self):
+        pass
+
+
+def test_rate_limit_stops_the_collection_immediately(settings):
+    """429 : on s'arrête net. L'IP est partagée avec une production tierce."""
+    stub = _RateLimitedClient()
+    report = nc.collect(
+        settings=settings, days_back=2, end_day=date(2026, 6, 16),
+        stations=STATIONS, client=stub, request_pause_s=0,
+        collected_at=datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc),
+    )
+    assert report["rate_limited"] is True
+    assert stub.calls == 1  # ni retry, ni station suivante, ni jour suivant
+
+
+def test_noise_health_is_written_for_supervision(settings):
+    stub = _StubClient()
+    nc.collect(
+        settings=settings, days_back=1, end_day=date(2026, 6, 16),
+        stations=(STATIONS[0],), client=stub, request_pause_s=0,
+        collected_at=datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc),
+    )
+    health = json.loads(settings.noise_health_path.read_text(encoding="utf-8"))
+    assert health["events_written"] == 2
+    assert health["window_resplits"] == 0
+    assert "token" in health
+    assert "secret" not in settings.noise_health_path.read_text(encoding="utf-8").lower()

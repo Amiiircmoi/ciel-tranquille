@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import date, datetime, timedelta
 
 import httpx
@@ -41,15 +42,53 @@ class BruitparifError(RuntimeError):
     """Erreur non récupérable côté Bruitparif (token, configuration)."""
 
 
+class BruitparifRateLimited(BruitparifError):
+    """L'API a répondu 429 : on **arrête**, on ne réessaie pas en boucle.
+
+    L'IP sortante est partagée avec une production tierce. Face à un 429, insister
+    est exactement ce qui transforme un ralentissement en blocage d'IP. L'appelant
+    doit s'arrêter proprement, conserver ce qu'il a déjà obtenu, et laisser passer
+    le délai annoncé.
+    """
+
+    def __init__(self, retry_after_s: float | None = None):
+        self.retry_after_s = retry_after_s
+        super().__init__(
+            "Bruitparif a répondu 429 (trop de requêtes)"
+            + (f" — attendre {retry_after_s:.0f}s." if retry_after_s else ".")
+        )
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float | None:
+    """Délai annoncé par l'API sur un 429 (`Retry-After`), borné à 1 h."""
+    raw = resp.headers.get("retry-after") or resp.headers.get(
+        "x-rate-limit-retry-after-seconds"
+    )
+    if not raw:
+        return None
+    try:
+        return max(1.0, min(float(raw), 3600.0))
+    except ValueError:
+        return None
+
+
 class BruitparifClient:
     """Accès à l'API REST publique `rumeurengine.bruitparif.fr`."""
 
     def __init__(self, settings: Settings | None = None, token: str | None = None):
         self.settings = settings or get_settings()
         self._token: str | None = token
+        # Santé de la récupération de token : le motif de scraping peut casser si
+        # Bruitparif redéploie sa SPA. On l'expose pour que la supervision en
+        # fasse un contrôle DISTINCT (cf. `status.py`), et pas un silence.
+        self.last_token_ok: bool | None = None
+        self.last_token_at: float | None = None
+        self.last_token_error: str | None = None
+        # User-Agent identifiable + contact : l'IP sortante est partagée avec une
+        # production tierce, un opérateur doit pouvoir nous joindre avant de bloquer.
         self._client = httpx.Client(
             timeout=httpx.Timeout(30.0),
-            headers={"User-Agent": "ciel-tranquille/1.0 (urban-noise-analysis; +github.com/Amiiircmoi/ciel-tranquille)"},
+            headers={"User-Agent": self.settings.http_user_agent},
         )
 
     # ------------------------------------------------------------------ token
@@ -60,15 +99,31 @@ class BruitparifClient:
         reraise=True,
     )
     def fetch_token(self) -> str:
-        """Scrape un token public courant depuis la page de l'app Survol."""
-        resp = self._client.get(self.settings.bruitparif_app_url)
-        resp.raise_for_status()
-        match = _TOKEN_RE.search(resp.text)
-        if not match:
-            raise BruitparifError(
-                "Token public introuvable dans la page Bruitparif "
-                "(structure de l'app modifiée ?)."
-            )
+        """Scrape un token public courant depuis la page de l'app Survol.
+
+        Point de fragilité assumé : le token est extrait du HTML par expression
+        régulière. Un redéploiement du front Bruitparif peut casser le motif —
+        auquel cas la collecte de bruit s'arrête. On enregistre donc l'issue de
+        chaque tentative (`last_token_ok`) pour que ce cas devienne un **signal
+        de supervision**, jamais un silence.
+        """
+        self.last_token_at = time.time()
+        try:
+            resp = self._client.get(self.settings.bruitparif_app_url)
+            resp.raise_for_status()
+            match = _TOKEN_RE.search(resp.text)
+            if not match:
+                raise BruitparifError(
+                    "Token public introuvable dans la page Bruitparif : le motif "
+                    "d'extraction ne correspond plus (front redéployé ?). "
+                    "Vérifier `_TOKEN_RE` dans bruitparif_client.py."
+                )
+        except Exception as exc:
+            self.last_token_ok = False
+            self.last_token_error = str(exc)
+            raise
+        self.last_token_ok = True
+        self.last_token_error = None
         return match.group(1)
 
     def token(self) -> str:
@@ -76,6 +131,47 @@ class BruitparifClient:
             self._token = self.fetch_token()
             logger.info("Token Bruitparif obtenu (len=%d).", len(self._token))
         return self._token
+
+    def token_health(self) -> dict:
+        """État de la dernière récupération de token (sans le token lui-même)."""
+        return {
+            "ok": self.last_token_ok,
+            "checked_at_unix": self.last_token_at,
+            "checked_at_iso": (
+                None
+                if self.last_token_at is None
+                else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.last_token_at))
+            ),
+            "error": self.last_token_error,
+        }
+
+    # ------------------------------------------------------------------ sites
+    @retry(
+        retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(4),
+        reraise=True,
+    )
+    def fetch_sites(self) -> list[dict]:
+        """Inventaire des points de mesure (`GET /sites`).
+
+        Sert à la **découverte** des stations du réseau Survol : leurs
+        identifiants ne sont pas devinables et leur statut évolue. Appel unique,
+        au déploiement — pas dans la boucle de collecte.
+        """
+        resp = self._client.get(
+            f"{self.settings.bruitparif_api_url}/sites", params={"token": self.token()}
+        )
+        if resp.status_code == 429:
+            raise BruitparifRateLimited(_retry_after_seconds(resp))
+        if resp.status_code in (401, 403):
+            self._token = None
+            raise BruitparifError(f"Accès refusé Bruitparif ({resp.status_code}).")
+        resp.raise_for_status()
+        payload = resp.json()
+        if isinstance(payload, dict):
+            payload = payload.get("sites") or payload.get("data") or []
+        return payload if isinstance(payload, list) else []
 
     # ----------------------------------------------------------------- events
     @staticmethod
@@ -106,6 +202,9 @@ class BruitparifClient:
         """
         url = f"{self.settings.bruitparif_api_url}/events/{station}/{self._fmt(frm)}/{self._fmt(to)}"
         resp = self._client.get(url, params={"token": self.token()})
+        if resp.status_code == 429:
+            # Arrêt propre : on ne rejoue pas, on remonte le délai annoncé.
+            raise BruitparifRateLimited(_retry_after_seconds(resp))
         if resp.status_code in (401, 403):
             # token périmé : on le réinitialise et on laisse tenacity rejouer
             self._token = None

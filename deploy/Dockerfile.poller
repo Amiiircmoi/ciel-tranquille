@@ -1,0 +1,60 @@
+# Image de COLLECTE (poller OpenSky, collecteur Bruitparif, compaction, statut).
+#
+# Distincte de l'image du dashboard (Dockerfile à la racine) et volontairement
+# réduite : seules les dépendances du socle sont installées — ni scikit-learn ni
+# Streamlit. Moins de surface, moins de Mo, et un conteneur qui ne sait rien
+# faire d'autre que collecter.
+#
+# Contrat d'exécution :
+#   - processus en utilisateur NON-ROOT (uid 10001) ;
+#   - la seule arborescence inscriptible est le volume monté sur /data ;
+#   - aucun port exposé : trafic sortant uniquement ;
+#   - secrets injectés par env_file au démarrage, jamais dans une couche d'image.
+
+# --- Étape de construction : compile les roues, ne part pas dans l'image finale.
+FROM python:3.11-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /build
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --upgrade pip \
+    && /opt/venv/bin/pip install .
+
+# --- Image finale : runtime seul.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    CIEL_DATA_DIR=/data
+
+# Utilisateur ET groupe dédiés, mêmes ids (10001) pour que le `chown` de l'hôte
+# décrit dans la procédure de déploiement corresponde exactement.
+RUN groupadd --system --gid 10001 ciel \
+    && useradd --system --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin ciel
+
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+# Configuration versionnée (liste de stations de repli). Lecture seule :
+# le sondage écrit sa propre liste dans $CIEL_DATA_DIR, seul emplacement
+# inscriptible du conteneur.
+COPY config ./config
+
+# /data est le SEUL emplacement cédé à l'utilisateur applicatif. /app reste la
+# propriété de root, en lecture seule pour le process : même sans le `read_only`
+# du compose, le code et la configuration ne sont pas réinscriptibles depuis le
+# conteneur. Si l'hôte monte un répertoire sur /data, c'est à lui d'en aligner le
+# propriétaire (cf. procédure de déploiement : chown 10001:10001).
+RUN mkdir -p /data && chown -R ciel:ciel /data
+
+USER ciel
+
+# Aucun EXPOSE : ce conteneur n'écoute sur rien.
+# Défaut : collecte forward continue. Les services compact / status / noise
+# surchargent la commande dans compose.prod.yaml.
+CMD ["python", "-m", "ciel_tranquille.ingest.poller", "--forward"]
