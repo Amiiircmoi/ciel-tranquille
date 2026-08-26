@@ -467,3 +467,35 @@ def test_live_noise_collector_passes(settings):
     )
     payload = status.build_status(settings, now=now, with_pairs=False)
     assert payload["verdict"] == "OK"
+
+
+# ------------------------------- pas de falaise a minuit UTC
+def test_noise_volume_check_uses_a_rolling_window(settings):
+    """À 00:06 UTC, le compteur du JOUR vaut zéro alors que tout va bien.
+
+    Régression observée en production : alerte urgente à 00:06, rétablie à 02:51
+    quand le collecteur a écrit ses premiers événements du nouveau jour. Une
+    fausse alerte quotidienne à minuit vide le canal de notification de son sens.
+    """
+    minuit_passe = NOON_UTC + 12 * 3600 + 360  # 2026-08-26 00:06 UTC
+    _healthy_poller(settings, minuit_passe)
+    # Événements de la veille au soir : rien encore pour le nouveau jour.
+    _seed_noise_events(settings, "2026-08-25", [_noise_event(1, minuit_passe - 2 * 3600)])
+
+    payload = status.build_status(settings, now=minuit_passe, with_pairs=False)
+
+    assert payload["bruit"]["events_today"] == 0       # jour calendaire : vide
+    assert payload["bruit"]["events_last_24h"] == 1    # fenêtre glissante : vivant
+    assert "collecte_bruit" not in payload["failed_checks"]
+
+
+def test_noise_volume_check_still_catches_a_real_stop(settings):
+    """La fenêtre glissante ne doit pas rendre le contrôle complaisant."""
+    now = NOON_UTC + 3600
+    _healthy_poller(settings, now)
+    # Dernier événement il y a plus de 24 h : la source est réellement morte.
+    _seed_noise_events(settings, "2026-08-23", [_noise_event(1, now - 30 * 3600)])
+
+    payload = status.build_status(settings, now=now, with_pairs=False)
+    assert payload["bruit"]["events_last_24h"] == 0
+    assert "collecte_bruit" in payload["failed_checks"]

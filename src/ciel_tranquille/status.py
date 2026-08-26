@@ -138,6 +138,24 @@ def _noise_events_frame(settings: Settings, day: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def _events_last_24h(settings: Settings, now: float) -> int:
+    """Nombre d'événements de bruit sur les 24 dernières heures **glissantes**.
+
+    Compter « aujourd'hui » en jour calendaire crée une falaise à minuit UTC : à
+    00:06 le compteur du jour vaut zéro et la collecte paraît morte alors qu'elle
+    se porte bien. Observé en production — une alerte urgente à 00:06, rétablie
+    à 02:51 quand le collecteur a écrit ses premiers événements du jour. Une
+    fenêtre glissante n'a pas de falaise.
+    """
+    total = 0
+    for offset in (0, 1):
+        jour = time.strftime("%Y-%m-%d", time.gmtime(now - offset * 86_400))
+        frame = _noise_events_frame(settings, jour)
+        if not frame.empty and "max_ts_unix" in frame.columns:
+            total += int((frame["max_ts_unix"] >= now - 86_400).sum())
+    return total
+
+
 def _last_event_ts(settings: Settings, now: float) -> float | None:
     """Horodatage du dernier événement de bruit collecté (aujourd'hui ou hier)."""
     latest: float | None = None
@@ -190,6 +208,7 @@ def noise_state(settings: Settings, now: float) -> dict:
     return {
         "day_utc": day,
         "events_today": int(len(events)),
+        "events_last_24h": _events_last_24h(settings, now),
         "stations_configured": stations_configured,
         "stations_reporting_today": len(per_station),
         "par_station": per_station,
@@ -384,10 +403,15 @@ def _checks(settings: Settings, collecte: dict, credits: dict, bruit: dict) -> l
             "ok": remaining is None or remaining > settings.credit_floor,
             "detail": f"crédits restants={remaining} (plancher {settings.credit_floor})",
         },
+        # Fenêtre GLISSANTE, pas jour calendaire : « aujourd'hui » vaut zéro à
+        # 00:06 UTC et ferait passer une collecte saine pour morte chaque nuit.
         {
             "name": "collecte_bruit",
-            "ok": bruit["events_today"] > 0 or bruit["stations_reporting_today"] > 0,
-            "detail": f"{bruit['events_today']} événements de survol aujourd'hui",
+            "ok": bruit["events_last_24h"] > 0,
+            "detail": (
+                f"{bruit['events_last_24h']} événements de survol sur 24 h glissantes "
+                f"({bruit['events_today']} depuis 00:00 UTC)"
+            ),
         },
         # Contrôle DISTINCT du poller avion : le token Bruitparif est scrapé dans
         # le HTML de la SPA. Un redéploiement du front casse le motif et arrête la
