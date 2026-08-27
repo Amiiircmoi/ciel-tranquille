@@ -172,3 +172,9 @@ def test_snapshot_without_manifest_is_refused(tmp_path):
     _paires(10, ("A",)).to_parquet(chemin, index=False)
     with pytest.raises(train_real.SnapshotIntegrityError, match="Manifeste introuvable"):
         train_real.load_frozen(chemin)
+
+
+def test_suffixed_copies_of_the_target_are_also_forbidden():
+    """Le gel duplique certaines colonnes en `_evt` : une cible recopiée reste une cible."""
+    with pytest.raises(ValueError, match="fuite de cible"):
+        features_real.check_no_leakage([*features_real.FEATURES, "max_laeq_evt"])

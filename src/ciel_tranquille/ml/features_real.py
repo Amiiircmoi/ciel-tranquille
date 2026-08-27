@@ -52,10 +52,14 @@ CATEGORICAL_FEATURES = ["airport"]
 FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
 # Interdits en entrée : fuite de cible (bloc 1) ou identifiants (bloc 2).
-LEAKAGE_COLS = [
+_INTERDITS = [
     "max_laeq", "laeq", "sel", "nrj_laeq", "duration_s",
     "event_id", "station", "station_lat", "station_lon", "icao24", "callsign",
 ]
+# Le gel conserve le contexte de l'événement à côté de la géométrie ; les
+# colonnes présentes des deux côtés y portent le suffixe `_evt`. Une cible
+# recopiée sous un autre nom reste une cible : la liste couvre les deux formes.
+LEAKAGE_COLS = [*_INTERDITS, *(f"{c}_evt" for c in _INTERDITS)]
 
 # Colonne de découpe : jamais une feature, toujours la clé du split.
 GROUP_COL = "station"

@@ -52,3 +52,6 @@ notebooks/
 # Données tierces brutes (Bruitparif/OpenSky) — local uniquement
 data/real_survol/
 data/real/
+
+# Instantanés figés du jeu d'entraînement (volumineux, reproductibles par ct-freeze)
+datasets/
