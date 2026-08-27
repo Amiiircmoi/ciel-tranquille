@@ -44,7 +44,19 @@ logger = logging.getLogger(__name__)
 
 # `states_<epoch>.parquet` — l'horodatage du snapshot est la clé d'idempotence.
 SNAPSHOT_RE = re.compile(r"^states_(\d+)\.parquet$")
+# `states_YYYYMMDDTHH.parquet` — sortie de la compaction horaire. Le `T` la rend
+# volontairement non confondable avec un snapshot brut.
+HOUR_FILE_RE = re.compile(r"^states_(\d{8})T(\d{2})\.parquet$")
 SECONDS_PER_HOUR = 3600
+
+
+def hour_file_span(name: str) -> tuple[int, int] | None:
+    """Fenêtre [début, fin[ couverte par un fichier compacté, ou None."""
+    match = HOUR_FILE_RE.match(name)
+    if not match:
+        return None
+    start = calendar.timegm(time.strptime(f"{match.group(1)} {match.group(2)}", "%Y%m%d %H"))
+    return start, start + SECONDS_PER_HOUR
 
 
 def hour_key(snapshot_ts: int) -> tuple[str, str]:

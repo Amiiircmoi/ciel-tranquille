@@ -50,6 +50,8 @@ ct-build = "ciel_tranquille.storage.build_curated:main"
 ct-synth = "ciel_tranquille.ml.synth:main"
 ct-train = "ciel_tranquille.ml.train:main"
 ct-eval-real = "ciel_tranquille.ml.evaluate_real:main"
+ct-freeze = "ciel_tranquille.ml.dataset:main"
+ct-train-real = "ciel_tranquille.ml.train_real:main"
 
 [build-system]
 requires = ["setuptools>=68"]

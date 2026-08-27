@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import time
+from pathlib import Path
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -499,3 +502,47 @@ def test_noise_volume_check_still_catches_a_real_stop(settings):
     payload = status.build_status(settings, now=now, with_pairs=False)
     assert payload["bruit"]["events_last_24h"] == 0
     assert "collecte_bruit" in payload["failed_checks"]
+
+
+def test_compacted_files_outside_the_hour_are_skipped(settings, monkeypatch):
+    """Le nom du fichier suffit à écarter une heure compactée hors sujet.
+
+    Sans ce tri, chaque heure calculée relisait tous les fichiers compactés :
+    un coût qui croît avec la durée de collecte alors que le travail utile est
+    constant. Le test compte les lectures, pas la durée — une mesure de temps
+    serait instable en intégration continue.
+    """
+    from ciel_tranquille import compact
+
+    stamps = [NOON_UTC + i * 30 for i in range(120)]
+    _seed_snapshots(settings, stamps, lat=STATION.latitude + 0.002, lon=STATION.longitude)
+    # Une seconde heure, très éloignée : elle n'a rien à voir avec la fenêtre visée.
+    lointain = NOON_UTC + 10 * 3600
+    _seed_snapshots(
+        settings, [lointain + i * 30 for i in range(120)],
+        lat=STATION.latitude + 0.002, lon=STATION.longitude,
+    )
+    compact.compact(settings=settings, lag_h=2, now=lointain + 6 * 3600)
+
+    lus = []
+    vrai = pd.read_parquet
+    monkeypatch.setattr(
+        status.pd, "read_parquet",
+        lambda path, *a, **k: (lus.append(Path(path).name), vrai(path, *a, **k))[1],
+    )
+    frame = status._load_states_hour(settings, NOON_UTC, NOON_UTC + 3600)
+
+    assert not frame.empty
+    horaires = [n for n in lus if "T" in n]
+    assert len(horaires) == 1, f"heures compactées relues à tort : {horaires}"
+    assert horaires[0].startswith("states_")
+
+
+def test_compacted_file_span_is_read_from_its_name():
+    from ciel_tranquille.compact import hour_file_span
+
+    debut, fin = hour_file_span("states_20260825T12.parquet")
+    assert time.strftime("%Y-%m-%dT%HZ", time.gmtime(debut)) == "2026-08-25T12Z"
+    assert fin - debut == 3600
+    # Un snapshot brut n'est pas un fichier horaire : on ne doit pas le confondre.
+    assert hour_file_span("states_1787659200.parquet") is None
