@@ -93,9 +93,9 @@ def test_loso_never_trains_on_the_tested_station(monkeypatch):
     vus = []
     vrai = train_real._fit_predict
 
-    def espion(nom, estimateur, train, test):
+    def espion(nom, estimateur, train, test, features=None):
         vus.append((set(train["station"]), set(test["station"])))
-        return vrai(nom, estimateur, train, test)
+        return vrai(nom, estimateur, train, test, features)
 
     monkeypatch.setattr(train_real, "_fit_predict", espion)
     train_real.leave_one_station_out(df, stations_test=["A", "B"])
@@ -121,8 +121,8 @@ def test_baseline_is_evaluated_by_the_same_harness():
     df = train_real.prepare(_paires())
     loso = train_real.leave_one_station_out(df, stations_test=["A", "B"])
     assert train_real.BASELINE_NAME in loso
-    assert "RandomForest" in loso
-    for nom in (train_real.BASELINE_NAME, "RandomForest"):
+    assert "ForetAleatoire" in loso
+    for nom in (train_real.BASELINE_NAME, "ForetAleatoire"):
         for cle in ("mae_db", "rmse_db", "r2"):
             assert cle in loso[nom]["moyenne"]
 
@@ -142,7 +142,8 @@ def test_holdout_evaluation_reports_baseline_and_models_side_by_side():
     assert "D" not in final["stations_entrainement"]
     assert train_real.BASELINE_NAME in final["resultats"]
     assert final["resultats"][train_real.BASELINE_NAME]["parametres"]["n_parametres"] == 1
-    assert set(train_real.candidate_models()) <= set(final["resultats"])
+    num, cat, _ = train_real.active_features()
+    assert set(train_real.candidate_models(num, cat)) <= set(final["resultats"])
 
 
 # ---------------------------------------------------------------- intégrité
@@ -178,3 +179,46 @@ def test_suffixed_copies_of_the_target_are_also_forbidden():
     """Le gel duplique certaines colonnes en `_evt` : une cible recopiée reste une cible."""
     with pytest.raises(ValueError, match="fuite de cible"):
         features_real.check_no_leakage([*features_real.FEATURES, "max_laeq_evt"])
+
+
+# -------------------------------------------------- exclusion par configuration
+def test_a_feature_can_be_dropped_without_touching_its_code():
+    """Écarter par configuration garde la dérivation testée et le choix traçable."""
+    num, cat, toutes = train_real.active_features(exclude=["is_weekend"])
+    assert "is_weekend" not in toutes
+    assert "is_weekend" in features_real.NUMERIC_FEATURES  # le code reste
+    assert len(toutes) == len(features_real.FEATURES) - 1
+    assert cat == features_real.CATEGORICAL_FEATURES
+
+
+def test_excluded_feature_never_reaches_the_models(monkeypatch):
+    df = train_real.prepare(_paires())
+    vus = []
+    vrai = train_real._fit_predict
+
+    def espion(nom, estimateur, train, test, features=None):
+        if features is not None:
+            vus.append(list(features))
+        return vrai(nom, estimateur, train, test, features)
+
+    monkeypatch.setattr(train_real, "_fit_predict", espion)
+    train_real.evaluate_holdout(df, "D", exclude=["is_weekend"])
+    assert vus, "aucun modèle ajusté"
+    for feats in vus:
+        assert "is_weekend" not in feats
+
+
+def test_cross_validation_reports_dispersion_not_just_the_mean():
+    """Une moyenne flatteuse assise sur une forte dispersion ne se transporte pas."""
+    df = train_real.prepare(_paires())
+    loso = train_real.leave_one_station_out(df, stations_test=["A", "B", "C"])
+    for resultat in loso.values():
+        assert set(resultat["ecart_type"]) == {"mae_db", "rmse_db", "r2"}
+        assert resultat["pire_station"] in resultat["par_station"]
+
+
+def test_the_three_requested_families_are_present():
+    num, cat, _ = train_real.active_features()
+    assert list(train_real.candidate_models(num, cat)) == [
+        "RegressionLineaire", "ForetAleatoire", "GradientBoosting",
+    ]
